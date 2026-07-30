@@ -30,10 +30,12 @@ test("launching a satellite charges cash and inserts a live sat", async ({ page 
   const ev = await waitForEvent(page, "launch");
   expect(ev.cost).toBe(TUNING.launchCost);
 
+  // The launch charges immediately — check before the sat can earn revenue.
+  const charged = await snapshot(page);
+  expect(charged.cash).toBe(TUNING.startingCash - TUNING.launchCost);
+
   await waitForEvent(page, "insert");
   await waitFor(page, (s) => s.satellites >= 1);
-  const s = await snapshot(page);
-  expect(s.cash).toBe(TUNING.startingCash - TUNING.launchCost);
 });
 
 test("a neglected satellite decays, goes critical, then deorbits", async ({ page }) => {
@@ -84,6 +86,22 @@ test("running out of runway ends the run", async ({ page }) => {
 
   const log = await events(page);
   expect(log.some((e) => e.type === "bankruptcy")).toBe(true);
+});
+
+test("an unaffordable launch is refused with a typed reason", async ({ page }) => {
+  await bootGame(page, { autoplay: true, debris: false });
+  await waitForScene(page, "game");
+
+  // Drain cash below the launch cost, then try to launch.
+  await addCash(page, -(TUNING.startingCash - TUNING.launchCost + 10));
+  await launch(page, 0);
+  const blockedEv = await waitForEvent(page, "action-blocked");
+  expect(blockedEv.action).toBe("launch");
+  expect(blockedEv.reason).toBe("cash");
+
+  // No launch happened: no launch event, cash unchanged.
+  const log = await events(page);
+  expect(log.some((e) => e.type === "launch")).toBe(false);
 });
 
 test("commanded de-orbit removes a sat cleanly, leaving no debris", async ({ page }) => {

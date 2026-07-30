@@ -8,22 +8,26 @@ export interface HudState {
   valuation: number;
   covered: boolean;
   sats: number;
+  satCap: number;
   debris: number;
   kesslerRisk: number;
   paused: boolean;
 }
 
-// Always-on runway / valuation / coverage overlay + the Kessler risk meter,
-// plus the pause banner and the game-over panel. Pure presentation — reads a
-// state struct each frame.
+// Always-on overlay built for legibility: every number says what it is and
+// what it's for, and a launch-status line answers "can I launch right now?".
+// Pure presentation — reads a state struct each frame.
 export class GameHud {
-  private runway: Phaser.GameObjects.Text;
-  private valuation: Phaser.GameObjects.Text;
+  private cashText: Phaser.GameObjects.Text;
+  private valuationText: Phaser.GameObjects.Text;
+  private launchStatus: Phaser.GameObjects.Text;
   private coverage: Phaser.GameObjects.Text;
   private sats: Phaser.GameObjects.Text;
   private kesslerLabel: Phaser.GameObjects.Text;
   private kesslerBar: Phaser.GameObjects.Rectangle;
   private pausedBanner: Phaser.GameObjects.Text;
+  private toastText: Phaser.GameObjects.Text;
+  private toastTween?: Phaser.Tweens.Tween;
   private overlay?: Phaser.GameObjects.Container;
 
   private static readonly BAR_W = 150;
@@ -31,11 +35,28 @@ export class GameHud {
   constructor(private scene: Phaser.Scene) {
     const w = TUNING.surface;
 
-    this.runway = scene.add
-      .text(18, 16, "", { fontFamily: FONT, fontSize: "22px", color: "#3dd6a0" })
+    this.cashText = scene.add
+      .text(18, 14, "", { fontFamily: FONT, fontSize: "22px", color: "#3dd6a0" })
       .setDepth(10);
-    this.valuation = scene.add
-      .text(18, 44, "", { fontFamily: FONT, fontSize: "14px", color: "#8fa1bc" })
+    scene.add
+      .text(18, 40, "pays for launches, boosts, de-orbits", {
+        fontFamily: FONT,
+        fontSize: "11px",
+        color: "#5f6f88",
+      })
+      .setDepth(10);
+    this.valuationText = scene.add
+      .text(18, 60, "", { fontFamily: FONT, fontSize: "15px", color: "#8fa1bc" })
+      .setDepth(10);
+    scene.add
+      .text(18, 78, "company worth — your score", {
+        fontFamily: FONT,
+        fontSize: "11px",
+        color: "#5f6f88",
+      })
+      .setDepth(10);
+    this.launchStatus = scene.add
+      .text(18, 102, "", { fontFamily: FONT, fontSize: "13px", color: "#97c459" })
       .setDepth(10);
 
     this.coverage = scene.add
@@ -49,7 +70,8 @@ export class GameHud {
 
     const barX = w - 18 - GameHud.BAR_W;
     this.kesslerLabel = scene.add
-      .text(barX, 64, "", { fontFamily: FONT, fontSize: "12px", color: "#8fa1bc" })
+      .text(w - 18, 64, "", { fontFamily: FONT, fontSize: "12px", color: "#8fa1bc" })
+      .setOrigin(1, 0)
       .setDepth(10);
     scene.add.rectangle(barX, 84, GameHud.BAR_W, 8, 0x23303f).setOrigin(0, 0).setDepth(10);
     this.kesslerBar = scene.add.rectangle(barX, 84, 0, 8, 0xe24b4a).setOrigin(0, 0).setDepth(10);
@@ -68,20 +90,50 @@ export class GameHud {
       .setOrigin(0.5, 0)
       .setDepth(10)
       .setVisible(false);
+
+    this.toastText = scene.add
+      .text(w / 2, w - 48, "", { fontFamily: FONT, fontSize: "14px", color: "#e6ecf5" })
+      .setOrigin(0.5, 1)
+      .setDepth(11)
+      .setAlpha(0);
   }
 
   update(s: HudState): void {
-    this.runway.setText(`RUNWAY  $${Math.round(s.cash)}`);
-    this.runway.setColor(s.cash < TUNING.launchCost ? "#e24b4a" : "#3dd6a0");
-    this.valuation.setText(`valuation  $${Math.round(s.valuation)}`);
-    this.coverage.setText(s.covered ? "COVERAGE  ● live" : "COVERAGE  ○ gap");
+    this.cashText.setText(`CASH  $${Math.round(s.cash)}`);
+    this.cashText.setColor(s.cash < TUNING.launchCost ? "#e24b4a" : "#3dd6a0");
+    this.valuationText.setText(`VALUATION  $${Math.round(s.valuation)}`);
+
+    if (s.sats >= s.satCap) {
+      this.launchStatus.setText(`launch — fleet full (${s.sats}/${s.satCap})`);
+      this.launchStatus.setColor("#ef9f27");
+    } else if (s.cash < TUNING.launchCost) {
+      this.launchStatus.setText(`launch $${TUNING.launchCost} — need more cash`);
+      this.launchStatus.setColor("#e24b4a");
+    } else {
+      this.launchStatus.setText(`launch $${TUNING.launchCost} — ready (click the ring)`);
+      this.launchStatus.setColor("#97c459");
+    }
+
+    this.coverage.setText(s.covered ? "COVERAGE  ● earning" : "COVERAGE  ○ gap — no income");
     this.coverage.setColor(s.covered ? "#97c459" : "#e24b4a");
-    this.sats.setText(`sats  ${s.sats}`);
+    this.sats.setText(`sats  ${s.sats}/${s.satCap}`);
     this.kesslerLabel.setText(`kessler risk · debris ${s.debris}`);
     this.kesslerBar.width = GameHud.BAR_W * Math.min(1, s.kesslerRisk);
     this.kesslerBar.fillColor =
       s.kesslerRisk > 0.66 ? 0xe24b4a : s.kesslerRisk > 0.33 ? 0xef9f27 : 0x3dd6a0;
     this.pausedBanner.setVisible(s.paused);
+  }
+
+  // Transient center-bottom message: selection hints, refused orders, etc.
+  toast(message: string): void {
+    this.toastTween?.stop();
+    this.toastText.setText(message).setAlpha(1);
+    this.toastTween = this.scene.tweens.add({
+      targets: this.toastText,
+      alpha: 0,
+      delay: 1800,
+      duration: 500,
+    });
   }
 
   showGameOver(reason: "bankruptcy" | "kessler", valuation: number): void {

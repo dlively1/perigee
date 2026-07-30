@@ -31,6 +31,13 @@ export type GameEvent =
   | { type: "collision"; t: number; satId: number; debrisId: number; angle: number }
   // Debris density crossed the cascade threshold — the ring is lost.
   | { type: "kessler-cascade"; t: number; debris: number }
+  // A player order couldn't execute (and the HUD said why).
+  | {
+      type: "action-blocked";
+      t: number;
+      action: "launch" | "boost" | "deorbit";
+      reason: "cash" | "max-sats" | "no-target";
+    }
   // Coverage of the contract region began / lapsed.
   | { type: "coverage-start"; t: number }
   | { type: "coverage-gap"; t: number }

@@ -54,6 +54,11 @@ export class GameScene extends Phaser.Scene {
   private regionAngle = 0; // contract region's ground angle (rotates with Earth)
   private earthSpin = 0; // cosmetic land rotation
   private covered = false;
+  // Seconds of coverage grace remaining — brief handoff gaps don't cut revenue.
+  private coverageLinger = 0;
+  // Seeded landmass polygons (local vertex offsets around an orbiting center),
+  // generated once per run so the planet reads as continents, not spots.
+  private landmasses: { angle: number; dist: number; pts: { x: number; y: number }[] }[] = [];
 
   private paused = false;
   private gameOver = false;
@@ -86,6 +91,8 @@ export class GameScene extends Phaser.Scene {
     this.regionAngle = this.rng.range(0, TWO_PI);
     this.earthSpin = 0;
     this.covered = false;
+    this.coverageLinger = 0;
+    this.buildLandmasses();
     this.paused = this.cfg.paused;
     this.gameOver = false;
     this.gameOverReason = null;
@@ -130,6 +137,7 @@ export class GameScene extends Phaser.Scene {
       const hit = this.satNearScreen(p.x, p.y);
       if (hit) {
         this.selectedId = hit.id;
+        this.hud.toast(`sat #${hit.id} selected — B to boost, D to de-orbit`);
       } else {
         this.doLaunch(Math.atan2(p.y - this.cy, p.x - this.cx));
       }
@@ -140,8 +148,14 @@ export class GameScene extends Phaser.Scene {
 
   private doLaunch(angle: number): void {
     if (this.gameOver) return;
-    if (this.sats.length >= TUNING.maxSatellites) return;
-    if (!canAfford(this.wallet.cash, TUNING.launchCost)) return;
+    if (this.sats.length >= TUNING.maxSatellites) {
+      this.blocked("launch", "max-sats", `fleet full — ${TUNING.maxSatellites} sats max`);
+      return;
+    }
+    if (!canAfford(this.wallet.cash, TUNING.launchCost)) {
+      this.blocked("launch", "cash", `launch costs $${TUNING.launchCost} — not enough cash`);
+      return;
+    }
     this.wallet.cash = spend(this.wallet.cash, TUNING.launchCost);
     const sat = createSatellite(
       this.nextId++,
@@ -163,8 +177,14 @@ export class GameScene extends Phaser.Scene {
   private doBoost(id?: number): void {
     if (this.gameOver) return;
     const target = id != null ? this.sats.find((s) => s.id === id && s.live) : this.mostUrgent();
-    if (!target) return;
-    if (!canAfford(this.wallet.cash, TUNING.boostCost)) return;
+    if (!target) {
+      this.blocked("boost", "no-target", "no satellite to boost");
+      return;
+    }
+    if (!canAfford(this.wallet.cash, TUNING.boostCost)) {
+      this.blocked("boost", "cash", `boost costs $${TUNING.boostCost} — not enough cash`);
+      return;
+    }
     this.wallet.cash = spend(this.wallet.cash, TUNING.boostCost);
     target.alt = boostAltitude(target.alt, TUNING.boostAmount);
     if (target.alt >= TUNING.criticalAltitude) target.critical = false;
@@ -188,8 +208,14 @@ export class GameScene extends Phaser.Scene {
         : this.selectedId != null
           ? this.sats.find((s) => s.id === this.selectedId && s.live)
           : this.mostUrgent();
-    if (!target) return;
-    if (!canAfford(this.wallet.cash, TUNING.deorbitCost)) return;
+    if (!target) {
+      this.blocked("deorbit", "no-target", "no satellite to de-orbit");
+      return;
+    }
+    if (!canAfford(this.wallet.cash, TUNING.deorbitCost)) {
+      this.blocked("deorbit", "cash", `de-orbit costs $${TUNING.deorbitCost} — not enough cash`);
+      return;
+    }
     this.wallet.cash = spend(this.wallet.cash, TUNING.deorbitCost);
     this.sats = this.sats.filter((s) => s.id !== target.id);
     if (this.selectedId === target.id) this.selectedId = null;
@@ -201,6 +227,37 @@ export class GameScene extends Phaser.Scene {
     if (this.gameOver) return;
     this.paused = !this.paused;
     getEventBus().updateSnapshot({ paused: this.paused });
+  }
+
+  // Report a refused order: toast for the player, typed event for agents.
+  private blocked(
+    action: "launch" | "boost" | "deorbit",
+    reason: "cash" | "max-sats" | "no-target",
+    message: string,
+  ): void {
+    this.hud.toast(message);
+    getEventBus().emit({ type: "action-blocked", t: 0, action, reason });
+  }
+
+  // Seeded blobby polygons that always stay inside the planet disc — continents
+  // instead of the old floating circles.
+  private buildLandmasses(): void {
+    this.landmasses = [];
+    // Keep sampling until a few continents actually fit (bounded attempts).
+    for (let i = 0; i < 14 && this.landmasses.length < 4; i++) {
+      const angle = this.rng.range(0, TWO_PI);
+      const dist = this.rng.range(0, TUNING.earthRadius * 0.5);
+      const maxR = Math.min(TUNING.earthRadius - 5 - dist, this.rng.range(11, 18));
+      if (maxR < 7) continue;
+      const verts = this.rng.int(8, 12);
+      const pts: { x: number; y: number }[] = [];
+      for (let v = 0; v < verts; v++) {
+        const a = (v / verts) * TWO_PI;
+        const r = maxR * this.rng.range(0.5, 1);
+        pts.push({ x: r * Math.cos(a), y: r * Math.sin(a) });
+      }
+      this.landmasses.push({ angle, dist, pts });
+    }
   }
 
   private addDebris(angle: number, alt: number, source: DebrisSource): void {
@@ -341,10 +398,17 @@ export class GameScene extends Phaser.Scene {
       this.flashes = this.flashes.filter((f) => f.ttl > 0);
     }
 
-    // Coverage + revenue.
+    // Coverage + revenue. A short grace window bridges momentary footprint
+    // handoff gaps so evenly-phased constellations don't flicker revenue.
     const liveAngles: number[] = [];
     for (const s of this.sats) if (s.live) liveAngles.push(s.angle);
-    const nowCovered = isAngleCovered(liveAngles, this.regionAngle, TUNING.footprintHalfWidth);
+    const rawCovered = isAngleCovered(liveAngles, this.regionAngle, TUNING.footprintHalfWidth);
+    if (rawCovered) {
+      this.coverageLinger = TUNING.coverageGraceSec;
+    } else {
+      this.coverageLinger = Math.max(0, this.coverageLinger - dt);
+    }
+    const nowCovered = rawCovered || this.coverageLinger > 0;
     if (nowCovered && !this.covered) bus.emit({ type: "coverage-start", t: 0 });
     if (!nowCovered && this.covered) bus.emit({ type: "coverage-gap", t: 0 });
     this.covered = nowCovered;
@@ -398,17 +462,16 @@ export class GameScene extends Phaser.Scene {
     );
     g.strokePath();
 
-    // Earth + a couple of rotating land blobs.
+    // Earth + slowly rotating continents (seeded polygons, always inside the disc).
     g.fillStyle(COL.earth, 1);
     g.fillCircle(this.cx, this.cy, TUNING.earthRadius);
     g.fillStyle(COL.earthLand, 1);
-    for (const [aOff, rOff, size] of [
-      [0.4, 0.35, 20],
-      [2.3, 0.5, 16],
-      [4.1, 0.25, 22],
-    ] as const) {
-      const p = pointOnCircle(this.cx, this.cy, TUNING.earthRadius * rOff, this.earthSpin + aOff);
-      g.fillCircle(p.x, p.y, size);
+    for (const lm of this.landmasses) {
+      const c = pointOnCircle(this.cx, this.cy, lm.dist, this.earthSpin + lm.angle);
+      g.fillPoints(
+        lm.pts.map((p) => ({ x: c.x + p.x, y: c.y + p.y })),
+        true,
+      );
     }
     g.lineStyle(1.5, COL.atmosphere, 0.5);
     g.strokeCircle(this.cx, this.cy, TUNING.earthRadius);
@@ -471,7 +534,8 @@ export class GameScene extends Phaser.Scene {
       cash: this.wallet.cash,
       valuation: this.wallet.valuation,
       covered: this.covered,
-      sats: this.sats.filter((s) => s.live).length,
+      sats: this.sats.length,
+      satCap: TUNING.maxSatellites,
       debris: this.debris.length,
       kesslerRisk: Math.min(1, this.debris.length / TUNING.kesslerCap),
       paused: this.paused,
