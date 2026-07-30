@@ -75,10 +75,7 @@ test("a low orbit drags down: decay-critical, then burn-up", async ({ page }) =>
   await waitFor(page, (s) => s.satellites === 0);
 });
 
-test("a prograde boost raises the orbit's far side (apogee)", async ({ page }) => {
-  // Real orbital mechanics: a prograde burn raises the OPPOSITE side of the
-  // orbit. On a circular orbit that means the apogee climbs; the perigee only
-  // climbs when you boost near apogee. Assert the honest version.
+test("a boost raises the whole orbit and circularizes it", async ({ page }) => {
   await bootGame(page, { autoplay: true, timeScale: 2, debris: false });
   await waitForScene(page, "game");
   await addCash(page, 500);
@@ -86,13 +83,36 @@ test("a prograde boost raises the orbit's far side (apogee)", async ({ page }) =
   await spawnSat(page, 0, 120); // decaying LEO orbit
   await waitFor(page, (s) => s.satellites === 1);
   const before = await snapshot(page);
-  const apogeeBefore = before.fleet[0].apogee;
 
   await boost(page);
   const b = await waitForEvent(page, "boost");
-  expect(b.dv).toBe(TUNING.boostDv);
+  expect(b.toRadius).toBeGreaterThan(b.fromRadius);
+
+  // Once the maneuver finishes, BOTH ends of the orbit sit higher — no wild
+  // ellipse — and the orbit is round.
+  await waitFor(
+    page,
+    (s, floor) => s.fleet[0].perigee > (floor as number),
+    20_000,
+    before.fleet[0].perigee + 10,
+  );
   const after = await snapshot(page);
-  expect(after.fleet[0].apogee).toBeGreaterThan(apogeeBefore + 5);
+  expect(after.fleet[0].apogee - after.fleet[0].perigee).toBeLessThan(12);
+});
+
+test("a boost can't lift a satellite out of its band", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 2, debris: false });
+  await waitForScene(page, "game");
+  await addCash(page, 500);
+
+  // Already at the top of LEO — climbing bands is what better pads are for.
+  await spawnSat(page, 0, 175);
+  await waitFor(page, (s) => s.satellites === 1);
+
+  await boost(page);
+  const blockedEv = await waitForEvent(page, "action-blocked");
+  expect(blockedEv.action).toBe("boost");
+  expect(blockedEv.reason).toBe("at-ceiling");
 });
 
 test("sustained coverage earns revenue and grows valuation", async ({ page }) => {
@@ -158,6 +178,24 @@ test("debris colliding with a satellite destroys it and spawns fragments", async
   const log = await events(page);
   expect(log.some((e) => e.type === "deorbit" && e.reason === "collision")).toBe(true);
   expect(log.some((e) => e.type === "debris-spawn" && e.source === "collision")).toBe(true);
+});
+
+test("debris striking debris shatters both and breeds fragments", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 4, debris: false });
+  await waitForScene(page, "game");
+
+  // Two pieces on the same circle heading opposite ways — they must meet.
+  await spawnDebris(page, 0, 200, 1);
+  await spawnDebris(page, Math.PI, 200, -1);
+
+  const hit = await waitForEvent(page, "debris-collision", 20_000);
+  expect(hit.aId).not.toBe(hit.bId);
+  const log = await events(page);
+  expect(
+    log.filter((e) => e.type === "debris-spawn" && e.source === "collision").length,
+  ).toBeGreaterThan(0);
+  // Net gain: two consumed, three born — this is what lets a cascade run away.
+  await waitFor(page, (s) => s.debris >= 3, 10_000);
 });
 
 test("too much debris triggers a Kessler cascade and ends the run", async ({ page }) => {

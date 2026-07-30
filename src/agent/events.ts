@@ -13,9 +13,9 @@ export type GameEvent =
   // The burnout orbit's perigee cleared the insert floor — the satellite is
   // live and earning. Carries the achieved orbit.
   | { type: "insert"; t: number; id: number; perigee: number; apogee: number }
-  // Prograde Δv applied. `perigee` is the post-boost value — boosting near
-  // apogee raises it most (that's the skill).
-  | { type: "boost"; t: number; id: number; dv: number; perigee: number; cost: number }
+  // An orbit-raise was ordered: the sat glides from `fromRadius` onto a
+  // circular orbit at `toRadius`.
+  | { type: "boost"; t: number; id: number; fromRadius: number; toRadius: number; cost: number }
   // A live sat's perigee dipped below the critical radius (fires once per dip).
   | { type: "decay-critical"; t: number; id: number; perigee: number }
   // A satellite is gone. `decay` = a live sat dragged down and burned up;
@@ -39,6 +39,8 @@ export type GameEvent =
   | { type: "debris-decay"; t: number; id: number }
   // A live sat and a debris struck each other (positions within collisionDist).
   | { type: "collision"; t: number; satId: number; debrisId: number; angle: number }
+  // Two pieces of debris struck each other — the cascade feeding itself.
+  | { type: "debris-collision"; t: number; aId: number; bId: number }
   // Debris density crossed the cascade threshold — the ring is lost.
   | { type: "kessler-cascade"; t: number; debris: number }
   // A player order couldn't execute (and the HUD said why).
@@ -46,7 +48,7 @@ export type GameEvent =
       type: "action-blocked";
       t: number;
       action: "launch" | "boost" | "deorbit" | "select-site";
-      reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown";
+      reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown" | "at-ceiling";
     }
   // Valuation crossed a launch site's threshold — it's now available.
   | { type: "site-unlocked"; t: number; siteId: string }
@@ -101,7 +103,7 @@ export interface GameBridge {
     // Fire from the active launch site: `fpaDeg` = flight-path angle in
     // degrees (0 = tangential/ideal), `power` = 0..1 speed dial.
     launch: (fpaDeg: number, power: number) => void;
-    // Boost a satellite (prograde Δv). With no id, boosts the selected sat,
+    // Raise a satellite's orbit one step. With no id, boosts the selected sat,
     // else the one with the lowest perigee.
     boost: (id?: number) => void;
     // Command a clean de-orbit (no debris). With no id, de-orbits the selected

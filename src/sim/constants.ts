@@ -41,9 +41,14 @@ export const TUNING = {
   insertFloor: 110,
   // Below this perigee a live sat is visibly dying — decay-critical fires.
   criticalPerigee: 100,
-  // Prograde Δv per boost. Raises the far side of the orbit — boosting at
-  // apogee is how you lift a transfer ellipse's perigee out of the drag.
-  boostDv: 26,
+  // Boost = a scripted orbit-raise, not an impulse: the satellite glides onto
+  // a circular orbit this much higher over `boostSeconds`. Simple and
+  // readable ("boost = up"); the real orbital mechanics live in the launch.
+  boostRise: 26,
+  boostSeconds: 1.1,
+  // A boost can't lift a satellite past the top of its current band — climbing
+  // bands needs a better launch pad. Margin keeps it just inside.
+  boostBandMargin: 8,
   // Beyond this radius a body is gone for good ("escaped").
   escapeRadius: 1400,
 
@@ -74,6 +79,9 @@ export const TUNING = {
   // A live sat and a debris collide inside this distance (px).
   collisionDist: 10,
   fragmentsPerCollision: 3,
+  // Debris-on-debris: two pieces consumed, three born — a slow net gain, so a
+  // crowded band snowballs rather than quietly cleaning itself up.
+  fragmentsPerDebrisCollision: 3,
   fragmentSpeedJitter: 30, // px/s scatter added to fragments
   kesslerCap: 26, // debris count at which the ring cascades → game over
 

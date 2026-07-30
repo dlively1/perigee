@@ -191,6 +191,31 @@ export function burnoutState(
   };
 }
 
+// One frame of a scripted orbit-raise. The body glides along a circular orbit
+// of `targetRadius`, advancing at that orbit's angular rate and keeping its
+// direction of travel. Deliberately NOT a physical impulse: a real prograde
+// burn raises only the opposite side of the orbit, which reads as "my
+// satellite flew off somewhere weird". This keeps boosting legible — the
+// satellite simply moves up — while launch stays honest physics.
+export function circularStep(
+  s: BodyState,
+  mu: number,
+  targetRadius: number,
+  dt: number,
+): BodyState {
+  const angle = Math.atan2(s.y, s.x);
+  // Sign of angular momentum tells us which way it's going round.
+  const dir = s.x * s.vy - s.y * s.vx >= 0 ? 1 : -1;
+  const v = circularSpeed(mu, targetRadius);
+  const a = angle + (v / targetRadius) * dir * dt;
+  return {
+    x: targetRadius * Math.cos(a),
+    y: targetRadius * Math.sin(a),
+    vx: -Math.sin(a) * v * dir,
+    vy: Math.cos(a) * v * dir,
+  };
+}
+
 export type PredictOutcome = "flying" | "crashed" | "escaped";
 
 export interface Prediction {

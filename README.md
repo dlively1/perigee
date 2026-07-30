@@ -6,8 +6,8 @@
 You run a scrappy space-internet company. **Launch** rockets from your pad into
 real Newtonian orbits, earn revenue by holding **coverage** over a contracted
 ground region, and fight the atmosphere: any orbit whose **perigee** dips low
-gets dragged down a little on every pass. **Boost** (prograde Δv) to keep birds
-up, **de-orbit** dying ones cleanly before they become junk. Let cash hit zero
+gets dragged down a little on every pass. **Boost** them back up to keep birds
+alive, **de-orbit** dying ones cleanly before they become junk. Let cash hit zero
 and you're bankrupt; let debris pile up and a **Kessler cascade** graveyards
 the sky. Your score is your company's **valuation**.
 
@@ -24,12 +24,14 @@ where that orbit goes (drag included):
 - **Power (↑↓)** sets insertion speed → how high the far side (apogee) reaches.
 - **Aim (←→)** sets the flight-path angle → tangential (0°) keeps the perigee
   healthy; lofted or dipped burns drop it into the atmosphere.
-- Low orbits are cheap but decay; high orbits are safe but cost more to reach:
-  launch a transfer ellipse, coast to apogee, then **boost there** to raise
-  your perigee out of the drag. (A prograde boost raises the _opposite_ side
-  of your orbit — that's real orbital mechanics, and it's the core skill.)
 
 Launching prograde (with Earth's spin) is slightly cheaper. Just like home.
+
+Once a satellite is up, **`B` boosts it**: it glides onto a circular orbit a
+step higher. That's the maintenance move against drag — simple and
+predictable, no orbital-mechanics degree required. What a boost _can't_ do is
+lift a satellite into a higher band; getting to MEO or GEO means launching
+there from a pad that can throw that hard.
 
 ## Growing the company
 

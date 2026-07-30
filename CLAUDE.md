@@ -3,7 +3,7 @@
 Soft-real-time satellite-strategy game. You're a scrappy space-internet
 company: **launch** rockets from your pad into real Newtonian orbits (aim +
 power pick the burnout state), fight atmospheric **drag** on every low perigee
-pass by spending on prograde **boosts**, and earn by holding **sustained
+pass by spending on orbit-raising **boosts**, and earn by holding **sustained
 coverage** over a contracted ground region — without running your cash to zero
 (bankruptcy) or littering the sky into a **Kessler cascade**. Score is your
 company **valuation**.
@@ -58,10 +58,14 @@ Since the trajectory-launch rewrite, orbits are REAL 2D Newtonian conics:
   (→ apogee); aim sets flight-path angle (0 = tangential = healthy perigee).
   The stage inherits Earth-rotation speed, so prograde launches are cheaper.
 - **Insert** = burnout perigee cleared `insertFloor` (a real orbit, not a lob).
-- **Boost** = prograde Δv. It raises the OPPOSITE side of the orbit — boosting
-  near apogee is how you lift a transfer ellipse's perigee out of the drag.
-  Reaching a high orbit = launch a transfer, coast to apogee, boost. This is
-  deliberate: the skill curve teaches real orbital mechanics with one button.
+- **Boost is deliberately NOT physical.** It's a scripted orbit-raise: the sat
+  goes on rails for `boostSeconds` and glides onto a _circular_ orbit
+  `boostRise` higher (`circularStep`), ignoring drag while it climbs. An
+  honest prograde impulse raises only the opposite side of the orbit, which
+  playtested as "my satellite flew off somewhere weird" — the physics skill
+  belongs in the launch, and boosting needs to read as simply "up". A boost
+  also cannot cross a band ceiling (`boostBandMargin`), so it can't substitute
+  for unlocking a better pad; that refusal emits `action-blocked/at-ceiling`.
 - Calibrated envelope (aim 0°): power ≈ 0.25 → circular LEO; ≈ 0.45 → MEO
   transfer; ≈ 0.62 → GEO transfer; near 1.0 flirts with escape. Unboosted LEO
   decays in ~70s with ~30s of critical warning.
@@ -152,7 +156,7 @@ window.__PERIGEE = {
   },
   input: {                      // headless input (works even while paused)
     launch(fpaDeg, power),      // fire from the active pad (power capped by it)
-    boost(id?),                 // prograde Δv (selected sat, else lowest perigee)
+    boost(id?),                 // orbit-raise (selected sat, else lowest perigee)
     deorbit(id?),               // clean removal, no debris
     selectSite(siteId),         // switch pads (must be unlocked)
     pause()
@@ -172,7 +176,8 @@ window.__PERIGEE = {
 
 `boot`, `scene`, `run-start`, `launch`, `insert`, `boost`, `decay-critical`,
 `deorbit` (reason: decay | crash | escaped | collision | commanded),
-`debris-spawn`, `debris-decay`, `collision`, `kessler-cascade`,
+`debris-spawn`, `debris-decay`, `collision`, `debris-collision`,
+`kessler-cascade`,
 `action-blocked` (action: launch | boost | deorbit | select-site),
 `site-unlocked`, `coverage-start`, `coverage-gap`, `revenue`, `bankruptcy`,
 `game-over` (reason: bankruptcy | kessler), `frame`. All carry `t` (ms since
@@ -214,12 +219,13 @@ Shipped, in order: **MVP loop** (launch/decay/boost/coverage/bankruptcy),
 **debris + Kessler cascade** (ambient junk, collisions → fragments, cascade
 cap, commanded de-orbit), **feel pass** (strategy pacing, HUD legibility,
 action-blocked feedback), **trajectory launch** (real Newtonian orbits, the
-launch console, atmosphere drag, boost-as-Δv), **bands + sites**
-(LEO/MEO/GEO, valuation-unlocked launch pads, altitude/pay trade).
+launch console, atmosphere drag), **bands + sites** (LEO/MEO/GEO,
+valuation-unlocked launch pads, altitude/pay trade), **playtest pass**
+(boost simplified to an orbit-raise, debris–debris collisions so cascades
+self-sustain, satellite art with footprint arcs).
 
-Deferred (do not add without scoping): debris–debris collisions (so a cascade
-can self-sustain — today debris attrits the fleet but rarely snowballs),
-eclipse/battery, explicit contracts + funding rounds, tech tree, launch
-failures, de-orbit tugs. See `perigee-design-brief.md` in the workspace for
+Deferred (do not add without scoping): eclipse/battery, explicit contracts +
+funding rounds, tech tree, launch failures, de-orbit tugs. See
+`perigee-design-brief.md` in the workspace for
 the design intent and the two-fail-state tension (bankruptcy vs. Kessler) the
 whole game is built around.

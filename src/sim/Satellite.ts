@@ -17,6 +17,11 @@ export interface Satellite extends BodyState {
   live: boolean;
   // Latches when perigee dips below critical so the event fires once per dip.
   critical: boolean;
+  // Orbit-raise maneuver: while > 0 the sat is on rails, gliding from
+  // raiseFrom to raiseTo on a circular orbit (see circularStep).
+  raiseRemaining: number;
+  raiseFrom: number;
+  raiseTo: number;
   // Cached elements, refreshed each step — read by HUD/snapshot/render.
   perigee: number;
   apogee: number;
@@ -37,6 +42,9 @@ export function createSatellite(
     padY,
     live: false,
     critical: false,
+    raiseRemaining: 0,
+    raiseFrom: 0,
+    raiseTo: 0,
     perigee: 0,
     apogee: 0,
   };

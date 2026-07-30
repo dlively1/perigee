@@ -9,9 +9,11 @@ import { createDebris, type Debris, type DebrisSource } from "../sim/Debris";
 import {
   TWO_PI,
   advanceAngle,
+  angleDelta,
   ascentPoint,
   burnoutState,
   circularSpeed,
+  circularStep,
   isAngleCovered,
   normalizeAngle,
   orbitalElements,
@@ -334,26 +336,33 @@ export class GameScene extends Phaser.Scene {
       this.blocked("boost", "cash", `boost costs $${TUNING.boostCost} — not enough cash`);
       return;
     }
+    // Raise the orbit one step, but never past the top of the current band —
+    // climbing to a higher band is what better launch pads are for.
+    const from = Math.hypot(target.x, target.y);
+    const band = bandFor(from);
+    const ceiling = Number.isFinite(band.max) ? band.max - TUNING.boostBandMargin : Infinity;
+    if (from >= ceiling) {
+      this.blocked(
+        "boost",
+        "at-ceiling",
+        `sat #${target.id} is at the top of ${band.label} — launch higher from a better pad`,
+      );
+      return;
+    }
+    const to = Math.min(from + TUNING.boostRise, ceiling);
     this.wallet.cash = spend(this.wallet.cash, TUNING.boostCost);
-    const sp = Math.hypot(target.vx, target.vy) || 1;
-    target.vx += (target.vx / sp) * TUNING.boostDv;
-    target.vy += (target.vy / sp) * TUNING.boostDv;
-    const el = orbitalElements(TUNING.mu, target);
-    target.perigee = el.perigee;
-    target.apogee = el.apogee;
-    if (el.perigee >= TUNING.criticalPerigee) target.critical = false;
+    target.raiseFrom = from;
+    target.raiseTo = to;
+    target.raiseRemaining = TUNING.boostSeconds;
     getEventBus().emit({
       type: "boost",
       t: 0,
       id: target.id,
-      dv: TUNING.boostDv,
-      perigee: el.perigee,
+      fromRadius: from,
+      toRadius: to,
       cost: TUNING.boostCost,
     });
-    // Teach the timing skill: a prograde burn raises the OPPOSITE side.
-    const shape = `${Math.round(el.perigee)}×${Math.round(el.apogee)}`;
-    const hint = el.apogee > el.perigee * 1.3 ? " — boost near apogee to raise the perigee" : "";
-    this.hud.toast(`sat #${target.id} boosted — orbit ${shape}${hint}`);
+    this.hud.toast(`sat #${target.id} raising to ${Math.round(to)} (${bandFor(to).label})`);
     this.pushSnapshot();
   }
 
@@ -400,7 +409,7 @@ export class GameScene extends Phaser.Scene {
 
   private blocked(
     action: "launch" | "boost" | "deorbit" | "select-site",
-    reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown",
+    reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown" | "at-ceiling",
     message: string,
   ): void {
     this.hud.toast(message);
@@ -541,6 +550,18 @@ export class GameScene extends Phaser.Scene {
         }
         continue;
       }
+      if (s.raiseRemaining > 0) {
+        // On rails: glide up to the target circular orbit, ignoring drag.
+        s.raiseRemaining = Math.max(0, s.raiseRemaining - dt);
+        const progress = 1 - s.raiseRemaining / TUNING.boostSeconds;
+        const targetR = s.raiseFrom + (s.raiseTo - s.raiseFrom) * progress;
+        Object.assign(s, circularStep(s, TUNING.mu, targetR, dt));
+        const rel = orbitalElements(TUNING.mu, s);
+        s.perigee = rel.perigee;
+        s.apogee = rel.apogee;
+        if (rel.perigee >= TUNING.criticalPerigee) s.critical = false;
+        continue;
+      }
       stepBody(TUNING.mu, s, dt, DRAG);
       const r = Math.hypot(s.x, s.y);
       const el = orbitalElements(TUNING.mu, s);
@@ -599,6 +620,33 @@ export class GameScene extends Phaser.Scene {
             y: (s.y + d.y) / 2,
             vx: (s.vx + d.vx) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
             vy: (s.vy + d.vy) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
+          });
+        }
+        break;
+      }
+    }
+
+    // Debris striking debris. This is what lets a cascade feed itself: each
+    // impact consumes two pieces and throws off more, so a crowded band can
+    // run away on its own even after every satellite is gone.
+    for (let i = 0; i < this.debris.length; i++) {
+      const a = this.debris[i];
+      if (deadDebris.includes(a.id)) continue;
+      for (let j = i + 1; j < this.debris.length; j++) {
+        const b = this.debris[j];
+        if (deadDebris.includes(b.id)) continue;
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        if (dx * dx + dy * dy > TUNING.collisionDist * TUNING.collisionDist) continue;
+        deadDebris.push(a.id, b.id);
+        bus.emit({ type: "debris-collision", t: 0, aId: a.id, bId: b.id });
+        this.flashes.push({ x: a.x, y: a.y, ttl: 0.3 });
+        for (let k = 0; k < TUNING.fragmentsPerDebrisCollision; k++) {
+          fragments.push({
+            x: (a.x + b.x) / 2,
+            y: (a.y + b.y) / 2,
+            vx: (a.vx + b.vx) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
+            vy: (a.vy + b.vy) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
           });
         }
         break;
@@ -765,9 +813,30 @@ export class GameScene extends Phaser.Scene {
             ? COL.warn
             : COL.danger;
 
+      const r = Math.hypot(s.x, s.y);
+      const angle = Math.atan2(s.y, s.x);
+
+      // Coverage footprint: the slice of ground this sat is serving right now.
+      // Widens with altitude (see bands), and brightens when it's over the
+      // contract region — the main read for "is this bird earning?".
+      if (s.live) {
+        const fw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
+        const serving = Math.abs(angleDelta(angle, this.regionAngle)) <= fw;
+        g.lineStyle(2, serving ? COL.covered : color, serving ? 0.75 : 0.22);
+        g.beginPath();
+        g.arc(this.cx, this.cy, r, angle - fw, angle + fw, false);
+        g.strokePath();
+        // Downlink cone to the ground it covers.
+        g.lineStyle(1, serving ? COL.covered : color, serving ? 0.45 : 0.15);
+        for (const edge of [-fw, fw]) {
+          const foot = pointOnCircle(this.cx, this.cy, TUNING.earthRadius, angle + edge);
+          g.lineBetween(sp.x, sp.y, foot.x, foot.y);
+        }
+      }
+
       if (s.id === this.selectedId) {
         g.lineStyle(2, COL.select, 0.9);
-        g.strokeCircle(sp.x, sp.y, 11);
+        g.strokeCircle(sp.x, sp.y, 13);
         // Show where the selected sat's orbit actually goes (drag included).
         const path = predictPath(TUNING.mu, s, DRAG, 14, TUNING.escapeRadius, 8, 0.03);
         g.fillStyle(COL.select, 0.35);
@@ -776,8 +845,21 @@ export class GameScene extends Phaser.Scene {
           g.fillCircle(q.x, q.y, 1);
         }
       }
+
+      // The satellite itself: a bus with two solar panels, wings laid along
+      // the orbit track so it reads as a spacecraft rather than a pixel.
+      const wx = -Math.sin(angle);
+      const wy = Math.cos(angle);
+      g.lineStyle(3, color, 0.85);
+      g.lineBetween(sp.x + wx * 4, sp.y + wy * 4, sp.x + wx * 11, sp.y + wy * 11);
+      g.lineBetween(sp.x - wx * 4, sp.y - wy * 4, sp.x - wx * 11, sp.y - wy * 11);
       g.fillStyle(color, 1);
-      g.fillRect(sp.x - 6, sp.y - 6, 12, 12);
+      g.fillRect(sp.x - 4, sp.y - 4, 8, 8);
+      // A boosting sat wears a bright ring while it climbs.
+      if (s.raiseRemaining > 0) {
+        g.lineStyle(2, COL.flash, 0.8);
+        g.strokeCircle(sp.x, sp.y, 9);
+      }
     }
 
     // Debris.

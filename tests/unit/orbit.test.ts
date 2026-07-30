@@ -7,6 +7,7 @@ import {
   ascentPoint,
   burnoutState,
   circularSpeed,
+  circularStep,
   isAngleCovered,
   normalizeAngle,
   orbitalElements,
@@ -165,6 +166,31 @@ describe("burnout launch model", () => {
     expect(start.y).toBeCloseTo(0);
     expect(end.x).toBeCloseTo(0);
     expect(end.y).toBeCloseTo(125);
+  });
+});
+
+describe("orbit-raise maneuver", () => {
+  it("puts the body on a circular orbit at the target radius", () => {
+    const s = { x: 120, y: 0, vx: 0, vy: circularSpeed(MU, 120) * 1.3 }; // eccentric
+    const next = circularStep(s, MU, 150, 1 / 60);
+    expect(Math.hypot(next.x, next.y)).toBeCloseTo(150, 3);
+    const el = orbitalElements(MU, next);
+    expect(el.e).toBeLessThan(0.01);
+  });
+
+  it("keeps advancing along the orbit", () => {
+    let s: BodyState = { x: 150, y: 0, vx: 0, vy: circularSpeed(MU, 150) };
+    const startAngle = Math.atan2(s.y, s.x);
+    for (let i = 0; i < 30; i++) s = circularStep(s, MU, 150, 1 / 60);
+    expect(Math.atan2(s.y, s.x)).not.toBeCloseTo(startAngle, 3);
+    expect(Math.hypot(s.x, s.y)).toBeCloseTo(150, 3);
+  });
+
+  it("preserves retrograde travel", () => {
+    const s = { x: 150, y: 0, vx: 0, vy: -circularSpeed(MU, 150) };
+    const next = circularStep(s, MU, 160, 1 / 60);
+    // Angular momentum keeps its sign.
+    expect(next.x * next.vy - next.y * next.vx).toBeLessThan(0);
   });
 });
 
