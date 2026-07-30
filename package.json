@@ -1,0 +1,40 @@
+{
+  "name": "perigee",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Soft-real-time satellite-startup game: launch sats, fight orbital decay, hold coverage, don't go broke.",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "playwright test",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:ui": "playwright test --ui",
+    "test:install": "playwright install --with-deps chromium",
+    "agent:loop": "playwright test --reporter=line"
+  },
+  "dependencies": {
+    "phaser": "^3.80.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^25.9.3",
+    "eslint": "^10.6.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
+  },
+  "packageManager": "pnpm@11.10.0"
+}
