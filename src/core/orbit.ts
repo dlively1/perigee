@@ -63,3 +63,20 @@ export function pointOnCircle(
 ): { x: number; y: number } {
   return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
 }
+
+// Two orbiting bodies collide when they are close in BOTH angle (they're at the
+// same point around the ring) and radius (they're at the same altitude). Pure
+// so the collision rule can be unit-tested independent of the scene.
+export function willCollide(
+  angleA: number,
+  radiusA: number,
+  angleB: number,
+  radiusB: number,
+  angleThresh: number,
+  radiusThresh: number,
+): boolean {
+  return (
+    Math.abs(angleDelta(angleA, angleB)) <= angleThresh &&
+    Math.abs(radiusA - radiusB) <= radiusThresh
+  );
+}

@@ -14,13 +14,29 @@ export type GameEvent =
   | { type: "boost"; t: number; id: number; altitude: number; cost: number }
   // A live sat's altitude crossed below the critical threshold (fires once).
   | { type: "decay-critical"; t: number; id: number; altitude: number }
-  // A sat's altitude hit zero — it burned up and is gone.
-  | { type: "deorbit"; t: number; id: number }
+  // A satellite left orbit. `decay` = burned up from neglect (clean, no debris);
+  // `collision` = struck by debris (spawns fragments); `commanded` = the player
+  // paid to de-orbit it cleanly.
+  | { type: "deorbit"; t: number; id: number; reason: "decay" | "collision" | "commanded" }
+  // A piece of debris entered / left the ring.
+  | {
+      type: "debris-spawn";
+      t: number;
+      id: number;
+      angle: number;
+      source: "ambient" | "collision" | "cheat";
+    }
+  | { type: "debris-decay"; t: number; id: number }
+  // A live sat and a debris struck each other.
+  | { type: "collision"; t: number; satId: number; debrisId: number; angle: number }
+  // Debris density crossed the cascade threshold — the ring is lost.
+  | { type: "kessler-cascade"; t: number; debris: number }
   // Coverage of the contract region began / lapsed.
   | { type: "coverage-start"; t: number }
   | { type: "coverage-gap"; t: number }
   | { type: "revenue"; t: number; cash: number; valuation: number }
   | { type: "bankruptcy"; t: number; valuation: number }
+  | { type: "game-over"; t: number; reason: "bankruptcy" | "kessler"; valuation: number }
   | { type: "frame"; t: number; fps: number; entities: number };
 
 export interface GameSnapshot {
@@ -29,6 +45,8 @@ export interface GameSnapshot {
   seed: number;
   paused: boolean;
   gameOver: boolean;
+  // Why the run ended, or null while it's live.
+  gameOverReason: "bankruptcy" | "kessler" | null;
   // Spendable cash (runway). Bankruptcy at <= 0.
   cash: number;
   // Cumulative revenue earned — the score.
@@ -39,6 +57,10 @@ export interface GameSnapshot {
   satellites: number;
   // Lowest altitude (0..1) across live sats, or 1 when none — the "most urgent".
   minAltitude: number;
+  // Pieces of debris currently on the ring.
+  debris: number;
+  // Kessler risk, 0..1 — debris count as a fraction of the cascade cap.
+  kesslerRisk: number;
   fps: number;
   entities: number;
   timeScale: number;
@@ -55,11 +77,17 @@ export interface GameBridge {
     launch: (angle: number) => void;
     // Boost a satellite. With no id, boosts the most-urgent (lowest) live sat.
     boost: (id?: number) => void;
+    // Command a clean de-orbit (no debris). With no id, de-orbits the selected
+    // sat, else the most-urgent one.
+    deorbit: (id?: number) => void;
     pause: () => void;
   };
   // Test shortcuts — jump the game to a state instead of grinding toward it.
   cheat: {
     addCash: (amount: number) => void;
+    // Drop a piece of debris at `angle` (default random) and altitude `alt`
+    // (default full). Lets tests set up collisions/cascades deterministically.
+    spawnDebris: (angle?: number, alt?: number) => void;
   };
   waitFor: (predicate: (s: GameSnapshot) => boolean, timeoutMs?: number) => Promise<GameSnapshot>;
   waitForEvent: <T extends GameEvent["type"]>(
@@ -92,11 +120,14 @@ class EventBus {
         seed,
         paused: false,
         gameOver: false,
+        gameOverReason: null,
         cash: 0,
         valuation: 0,
         covered: false,
         satellites: 0,
         minAltitude: 1,
+        debris: 0,
+        kesslerRisk: 0,
         fps: 0,
         entities: 0,
         timeScale: 1,
@@ -104,10 +135,12 @@ class EventBus {
       input: {
         launch: () => {},
         boost: () => {},
+        deorbit: () => {},
         pause: () => {},
       },
       cheat: {
         addCash: () => {},
+        spawnDebris: () => {},
       },
       waitFor: (predicate, timeoutMs = 10_000) =>
         new Promise((resolve, reject) => {

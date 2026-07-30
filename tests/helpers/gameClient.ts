@@ -7,6 +7,9 @@ export interface GameClientOptions {
   debug?: boolean;
   paused?: boolean;
   muted?: boolean;
+  // Ambient debris spawning. Defaults to on; pass false to isolate the
+  // decay/boost/coverage lifecycle from stray collisions.
+  debris?: boolean;
   // Run the sim N× faster (1–8) to cut wall-clock time on tests that wait for
   // organic decay / deorbit.
   timeScale?: number;
@@ -19,6 +22,7 @@ export async function bootGame(page: Page, opts: GameClientOptions = {}): Promis
   if (opts.debug) params.set("debug", "1");
   if (opts.paused) params.set("paused", "1");
   if (opts.muted !== false) params.set("muted", "1");
+  if (opts.debris === false) params.set("debris", "0");
   if (opts.timeScale != null) params.set("timeScale", String(opts.timeScale));
   const qs = params.toString();
   await page.goto(`/${qs ? `?${qs}` : ""}`);
@@ -49,8 +53,19 @@ export async function boost(page: Page, id?: number): Promise<void> {
   await page.evaluate((i) => window.__PERIGEE!.input.boost(i), id);
 }
 
+export async function deorbit(page: Page, id?: number): Promise<void> {
+  await page.evaluate((i) => window.__PERIGEE!.input.deorbit(i), id);
+}
+
 export async function addCash(page: Page, amount: number): Promise<void> {
   await page.evaluate((a) => window.__PERIGEE!.cheat.addCash(a), amount);
+}
+
+export async function spawnDebris(page: Page, angle?: number, alt?: number): Promise<void> {
+  await page.evaluate(([a, al]) => window.__PERIGEE!.cheat.spawnDebris(a, al), [
+    angle,
+    alt,
+  ] as const);
 }
 
 export async function waitFor(

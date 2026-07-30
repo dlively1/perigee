@@ -4,6 +4,9 @@ export interface AgentConfig {
   autoplay: boolean;
   paused: boolean;
   muted: boolean;
+  // Ambient (external) debris spawning. On by default; tests that isolate the
+  // decay/boost lifecycle turn it off so a stray collision can't interfere.
+  debris: boolean;
   // Run the whole sim N× faster (1–8). Scales the clock feeding decay, orbits,
   // Earth rotation, and revenue so seeded runs stay equivalent — built for
   // tests that would otherwise wait wall-clock minutes for a deorbit.
@@ -16,6 +19,7 @@ const DEFAULTS: AgentConfig = {
   autoplay: false,
   paused: false,
   muted: false,
+  debris: true,
   timeScale: 1,
 };
 
@@ -48,6 +52,7 @@ export function readAgentConfig(search: string = location.search): AgentConfig {
     autoplay: asBool(p.get("autoplay"), DEFAULTS.autoplay),
     paused: asBool(p.get("paused"), DEFAULTS.paused),
     muted: asBool(p.get("muted"), DEFAULTS.muted),
+    debris: asBool(p.get("debris"), DEFAULTS.debris),
     timeScale: clamp(asFloat(p.get("timeScale"), DEFAULTS.timeScale), 1, 8),
   };
 }

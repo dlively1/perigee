@@ -8,18 +8,25 @@ export interface HudState {
   valuation: number;
   covered: boolean;
   sats: number;
+  debris: number;
+  kesslerRisk: number;
   paused: boolean;
 }
 
-// Always-on runway / valuation / coverage overlay, plus the pause banner and
-// the bankruptcy panel. Pure presentation — reads a state struct each frame.
+// Always-on runway / valuation / coverage overlay + the Kessler risk meter,
+// plus the pause banner and the game-over panel. Pure presentation — reads a
+// state struct each frame.
 export class GameHud {
   private runway: Phaser.GameObjects.Text;
   private valuation: Phaser.GameObjects.Text;
   private coverage: Phaser.GameObjects.Text;
   private sats: Phaser.GameObjects.Text;
+  private kesslerLabel: Phaser.GameObjects.Text;
+  private kesslerBar: Phaser.GameObjects.Rectangle;
   private pausedBanner: Phaser.GameObjects.Text;
   private overlay?: Phaser.GameObjects.Container;
+
+  private static readonly BAR_W = 150;
 
   constructor(private scene: Phaser.Scene) {
     const w = TUNING.surface;
@@ -40,8 +47,15 @@ export class GameHud {
       .setOrigin(1, 0)
       .setDepth(10);
 
+    const barX = w - 18 - GameHud.BAR_W;
+    this.kesslerLabel = scene.add
+      .text(barX, 64, "", { fontFamily: FONT, fontSize: "12px", color: "#8fa1bc" })
+      .setDepth(10);
+    scene.add.rectangle(barX, 84, GameHud.BAR_W, 8, 0x23303f).setOrigin(0, 0).setDepth(10);
+    this.kesslerBar = scene.add.rectangle(barX, 84, 0, 8, 0xe24b4a).setOrigin(0, 0).setDepth(10);
+
     scene.add
-      .text(w / 2, w - 20, "click ring: launch   ·   click sat then B: boost   ·   SPACE: pause", {
+      .text(w / 2, w - 20, "click: launch  ·  select + B: boost  ·  D: de-orbit  ·  SPACE: pause", {
         fontFamily: FONT,
         fontSize: "13px",
         color: "#5f6f88",
@@ -63,17 +77,22 @@ export class GameHud {
     this.coverage.setText(s.covered ? "COVERAGE  ● live" : "COVERAGE  ○ gap");
     this.coverage.setColor(s.covered ? "#97c459" : "#e24b4a");
     this.sats.setText(`sats  ${s.sats}`);
+    this.kesslerLabel.setText(`kessler risk · debris ${s.debris}`);
+    this.kesslerBar.width = GameHud.BAR_W * Math.min(1, s.kesslerRisk);
+    this.kesslerBar.fillColor =
+      s.kesslerRisk > 0.66 ? 0xe24b4a : s.kesslerRisk > 0.33 ? 0xef9f27 : 0x3dd6a0;
     this.pausedBanner.setVisible(s.paused);
   }
 
-  showGameOver(valuation: number): void {
+  showGameOver(reason: "bankruptcy" | "kessler", valuation: number): void {
     if (this.overlay) return;
     const w = TUNING.surface;
+    const heading = reason === "kessler" ? "KESSLER CASCADE" : "BANKRUPT";
     const panel = this.scene.add
-      .rectangle(w / 2, w / 2, 420, 200, 0x0e1526, 0.94)
+      .rectangle(w / 2, w / 2, 460, 200, 0x0e1526, 0.94)
       .setStrokeStyle(1, 0x2a3a56);
     const title = this.scene.add
-      .text(w / 2, w / 2 - 52, "BANKRUPT", { fontFamily: FONT, fontSize: "40px", color: "#e24b4a" })
+      .text(w / 2, w / 2 - 52, heading, { fontFamily: FONT, fontSize: "38px", color: "#e24b4a" })
       .setOrigin(0.5);
     const score = this.scene.add
       .text(w / 2, w / 2 + 4, `final valuation  $${Math.round(valuation)}`, {
