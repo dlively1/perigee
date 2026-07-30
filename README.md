@@ -31,6 +31,25 @@ where that orbit goes (drag included):
 
 Launching prograde (with Earth's spin) is slightly cheaper. Just like home.
 
+## Growing the company
+
+**Cash operates, valuation unlocks.** Revenue pays both: cash funds launches
+and boosts, while valuation (your cumulative earnings — the score) opens
+better **launch pads**. Your starter pad can barely reach LEO; the pads you
+unlock lift the power ceiling until you can throw a GEO transfer.
+
+That matters because altitude is a trade:
+
+| Band    | Drag & debris     | Footprint | Pays      |
+| ------- | ----------------- | --------- | --------- |
+| **LEO** | decays, congested | narrow    | full rate |
+| **MEO** | clear             | wider     | 70%       |
+| **GEO** | clear             | widest    | 45%       |
+
+Low orbits print money but need constant boosting and share the sky with
+junk. High orbits run themselves but pay less. A good constellation mixes
+both — and the only way up is to earn your way there.
+
 ## Controls
 
 | Input             | Action                                           |
@@ -39,6 +58,8 @@ Launching prograde (with Earth's spin) is slightly cheaper. Just like home.
 | `←` `→`           | Aim (flight-path angle)                          |
 | `↑` `↓`           | Power (insertion speed)                          |
 | `Enter`           | Fire ($110)                                      |
+| `1` `2` `3`       | Pick a launch pad (once unlocked)                |
+| `Tab`             | Cycle unlocked pads                              |
 | `Esc`             | Close the console                                |
 | Click a satellite | Select it (shows its predicted path)             |
 | `B`               | Boost the selected sat (else the lowest perigee) |

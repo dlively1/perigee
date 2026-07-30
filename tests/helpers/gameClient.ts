@@ -63,6 +63,15 @@ export async function addCash(page: Page, amount: number): Promise<void> {
   await page.evaluate((a) => window.__PERIGEE!.cheat.addCash(a), amount);
 }
 
+// Raise valuation directly — drives launch-site unlocks without grinding.
+export async function addValuation(page: Page, amount: number): Promise<void> {
+  await page.evaluate((a) => window.__PERIGEE!.cheat.addValuation(a), amount);
+}
+
+export async function selectSite(page: Page, siteId: string): Promise<void> {
+  await page.evaluate((s) => window.__PERIGEE!.input.selectSite(s), siteId);
+}
+
 // Place a live satellite directly on orbit (test shortcut): circular speed at
 // `radius` scaled by `vFactor` (1 = circular, negative = retrograde).
 export async function spawnSat(
@@ -93,18 +102,39 @@ export async function spawnDebris(
 
 export async function waitFor(
   page: Page,
-  predicate: (s: GameSnapshot) => boolean,
+  // NOTE: the predicate is stringified and evaluated INSIDE the page, so it
+  // cannot close over Node-side values. Pass anything it needs via `arg`,
+  // which arrives as the second parameter.
+  predicate: (s: GameSnapshot, arg?: unknown) => boolean,
   timeoutMs = 15_000,
+  arg?: unknown,
 ): Promise<void> {
   await page.waitForFunction(
-    (fnStr) => {
+    ({ fnStr, a }) => {
       const s = window.__PERIGEE?.snapshot;
       if (!s) return false;
-      return new Function("s", `return (${fnStr})(s)`)(s);
+      return new Function("s", "arg", `return (${fnStr})(s, arg)`)(s, a);
     },
-    predicate.toString(),
+    { fnStr: predicate.toString(), a: arg },
     { timeout: timeoutMs },
   );
+}
+
+// Wait for an event that occurred strictly after `sinceT` (ms since boot).
+// Use this when a test fires the same action twice — plain waitForEvent
+// returns the FIRST match still in the ring buffer, i.e. the older one.
+export async function waitForEventAfter<T extends GameEvent["type"]>(
+  page: Page,
+  type: T,
+  sinceT: number,
+  timeoutMs = 15_000,
+): Promise<Extract<GameEvent, { type: T }>> {
+  const handle = await page.waitForFunction(
+    ({ t, since }) => window.__PERIGEE?.events.find((e) => e.type === t && e.t > since) ?? null,
+    { t: type, since: sinceT },
+    { timeout: timeoutMs },
+  );
+  return (await handle.jsonValue()) as Extract<GameEvent, { type: T }>;
 }
 
 export async function waitForEvent<T extends GameEvent["type"]>(

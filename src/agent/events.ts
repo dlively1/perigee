@@ -45,9 +45,11 @@ export type GameEvent =
   | {
       type: "action-blocked";
       t: number;
-      action: "launch" | "boost" | "deorbit";
-      reason: "cash" | "max-sats" | "no-target";
+      action: "launch" | "boost" | "deorbit" | "select-site";
+      reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown";
     }
+  // Valuation crossed a launch site's threshold — it's now available.
+  | { type: "site-unlocked"; t: number; siteId: string }
   // Coverage of the contract region began / lapsed.
   | { type: "coverage-start"; t: number }
   | { type: "coverage-gap"; t: number }
@@ -77,6 +79,9 @@ export interface GameSnapshot {
   minPerigee: number;
   // Per-sat orbit summary for agents: id, live flag, cached perigee/apogee.
   fleet: { id: number; live: boolean; perigee: number; apogee: number }[];
+  // Active launch site + which sites valuation has unlocked.
+  activeSite: string;
+  unlockedSites: string[];
   // Pieces of debris currently in orbit.
   debris: number;
   // Kessler risk, 0..1 — debris count as a fraction of the cascade cap.
@@ -102,11 +107,15 @@ export interface GameBridge {
     // Command a clean de-orbit (no debris). With no id, de-orbits the selected
     // sat, else the lowest-perigee one.
     deorbit: (id?: number) => void;
+    // Switch the active launch site (must be unlocked).
+    selectSite: (siteId: string) => void;
     pause: () => void;
   };
   // Test shortcuts — jump the game to a state instead of grinding toward it.
   cheat: {
     addCash: (amount: number) => void;
+    // Raise valuation directly (drives site unlocks in tests).
+    addValuation: (amount: number) => void;
     // Place a live satellite directly on orbit: circular speed at `radius`
     // scaled by `vFactor` (1 = circular, negative = retrograde).
     spawnSat: (angle: number, radius: number, vFactor?: number) => void;
@@ -151,6 +160,8 @@ class EventBus {
         satellites: 0,
         minPerigee: 0,
         fleet: [],
+        activeSite: "",
+        unlockedSites: [],
         debris: 0,
         kesslerRisk: 0,
         fps: 0,
@@ -161,10 +172,12 @@ class EventBus {
         launch: () => {},
         boost: () => {},
         deorbit: () => {},
+        selectSite: () => {},
         pause: () => {},
       },
       cheat: {
         addCash: () => {},
+        addValuation: () => {},
         spawnSat: () => {},
         spawnDebris: () => {},
       },

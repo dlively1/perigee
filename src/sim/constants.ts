@@ -3,8 +3,9 @@
 // center = the gravity origin), times in seconds, speeds in px/s.
 
 export const TUNING = {
-  // Geometry
-  surface: 640,
+  // Geometry. The surface must comfortably contain the GEO band (r=300) plus
+  // transfer apogees, or high orbits clip off-screen.
+  surface: 760,
   earthRadius: 58,
 
   // Gravity. Chosen so a circular LEO orbit (r≈150) has a ~8.5s period —

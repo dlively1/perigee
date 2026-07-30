@@ -66,6 +66,24 @@ Since the trajectory-launch rewrite, orbits are REAL 2D Newtonian conics:
   transfer; ≈ 0.62 → GEO transfer; near 1.0 flirts with escape. Unboosted LEO
   decays in ~70s with ~30s of critical warning.
 
+## Progression (bands + sites)
+
+Two data registries drive the whole meta layer — extend these, not the scene:
+
+- **`src/sim/bands.ts`** — LEO / MEO / GEO, classified by current radius (so
+  an eccentric orbit is judged by where it is _now_). Higher = safer (above
+  the drag ceiling, away from ambient junk) and a wider footprint, but a lower
+  `rateMult`: high-orbit internet has latency, so contracts pay less. That's
+  the core trade — LEO pays best and dies fastest.
+- **`src/sim/sites.ts`** — launch pads, fixed in the Earth frame (they rotate
+  with the planet). Each caps the console's power dial via `maxPower`, and
+  auto-unlocks when **valuation** reaches `unlockValuation`. That's the
+  economy split made concrete: **cash operates, valuation unlocks.** The
+  starter pad tops out around LEO; the best pad reaches GEO transfers.
+
+When several sats cover the region at once, the best-paying (lowest) band sets
+the rate. Unlocks are checked as revenue accrues, and emit `site-unlocked`.
+
 ## Repository map
 
 ```
@@ -84,6 +102,8 @@ src/
                         economy, debris) + DRAG model bundle
     Satellite.ts        Satellite = physics body + lifecycle (ascent/live/critical)
     Debris.ts           Debris = physics body + source tag
+    bands.ts            LEO/MEO/GEO registry — classification, pay rate, footprint
+    sites.ts            Launch-pad registry — angle, power cap, valuation unlock
   scenes/
     BootScene.ts        Emit boot → menu
     MenuScene.ts        Title; SPACE/click → game (or autoplay)
@@ -127,16 +147,19 @@ window.__PERIGEE = {
     ready, scene, seed, paused, gameOver, gameOverReason,
     cash, valuation, covered, satellites, minPerigee,
     fleet: [{ id, live, perigee, apogee }],
+    activeSite, unlockedSites: string[],
     debris, kesslerRisk, fps, entities, timeScale
   },
   input: {                      // headless input (works even while paused)
-    launch(fpaDeg, power),      // fire from the site: aim° from tangential, 0..1 power
+    launch(fpaDeg, power),      // fire from the active pad (power capped by it)
     boost(id?),                 // prograde Δv (selected sat, else lowest perigee)
     deorbit(id?),               // clean removal, no debris
+    selectSite(siteId),         // switch pads (must be unlocked)
     pause()
   },
   cheat: {                      // test shortcuts — jump to a state
     addCash(amount),
+    addValuation(amount),                 // drives site unlocks
     spawnSat(angle, radius, vFactor?),    // live sat on orbit (1 = circular)
     spawnDebris(angle?, radius?, vFactor?)
   },
@@ -150,9 +173,15 @@ window.__PERIGEE = {
 `boot`, `scene`, `run-start`, `launch`, `insert`, `boost`, `decay-critical`,
 `deorbit` (reason: decay | crash | escaped | collision | commanded),
 `debris-spawn`, `debris-decay`, `collision`, `kessler-cascade`,
-`action-blocked`, `coverage-start`, `coverage-gap`, `revenue`, `bankruptcy`,
+`action-blocked` (action: launch | boost | deorbit | select-site),
+`site-unlocked`, `coverage-start`, `coverage-gap`, `revenue`, `bankruptcy`,
 `game-over` (reason: bankruptcy | kessler), `frame`. All carry `t` (ms since
 boot, monotonic). Exact shapes in `src/agent/events.ts`.
+
+Test-harness note: `waitForEvent` returns the FIRST match in the ring buffer —
+when a spec fires the same action twice, use `waitForEventAfter(type, sinceT)`.
+And `waitFor`'s predicate is stringified and run inside the page, so it cannot
+close over Node-side values; pass them via the `arg` parameter.
 
 ## Conventions
 
@@ -185,11 +214,12 @@ Shipped, in order: **MVP loop** (launch/decay/boost/coverage/bankruptcy),
 **debris + Kessler cascade** (ambient junk, collisions → fragments, cascade
 cap, commanded de-orbit), **feel pass** (strategy pacing, HUD legibility,
 action-blocked feedback), **trajectory launch** (real Newtonian orbits, the
-launch console, atmosphere drag, boost-as-Δv).
+launch console, atmosphere drag, boost-as-Δv), **bands + sites**
+(LEO/MEO/GEO, valuation-unlocked launch pads, altitude/pay trade).
 
-Deferred (do not add without scoping): orbit **bands + launch sites +
-valuation-gated progression** (stage 3, in flight), debris–debris collisions
-(cascade self-sustain), eclipse/battery, contracts/funding rounds, launch
+Deferred (do not add without scoping): debris–debris collisions (so a cascade
+can self-sustain — today debris attrits the fleet but rarely snowballs),
+eclipse/battery, explicit contracts + funding rounds, tech tree, launch
 failures, de-orbit tugs. See `perigee-design-brief.md` in the workspace for
 the design intent and the two-fail-state tension (bankruptcy vs. Kessler) the
 whole game is built around.

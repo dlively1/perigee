@@ -13,6 +13,9 @@ export interface HudState {
   kesslerRisk: number;
   paused: boolean;
   consoleOpen: boolean;
+  siteName: string;
+  // The next launch site valuation will unlock, or null when all are open.
+  nextUnlock: { name: string; at: number } | null;
 }
 
 // Always-on overlay built for legibility: every number says what it is and
@@ -21,7 +24,9 @@ export interface HudState {
 export class GameHud {
   private cashText: Phaser.GameObjects.Text;
   private valuationText: Phaser.GameObjects.Text;
+  private valuationSub: Phaser.GameObjects.Text;
   private launchStatus: Phaser.GameObjects.Text;
+  private siteText: Phaser.GameObjects.Text;
   private coverage: Phaser.GameObjects.Text;
   private sats: Phaser.GameObjects.Text;
   private kesslerLabel: Phaser.GameObjects.Text;
@@ -49,15 +54,14 @@ export class GameHud {
     this.valuationText = scene.add
       .text(18, 60, "", { fontFamily: FONT, fontSize: "15px", color: "#8fa1bc" })
       .setDepth(10);
-    scene.add
-      .text(18, 78, "company worth — your score", {
-        fontFamily: FONT,
-        fontSize: "11px",
-        color: "#5f6f88",
-      })
+    this.valuationSub = scene.add
+      .text(18, 78, "", { fontFamily: FONT, fontSize: "11px", color: "#5f6f88" })
       .setDepth(10);
     this.launchStatus = scene.add
       .text(18, 102, "", { fontFamily: FONT, fontSize: "13px", color: "#97c459" })
+      .setDepth(10);
+    this.siteText = scene.add
+      .text(18, 122, "", { fontFamily: FONT, fontSize: "12px", color: "#8fa1bc" })
       .setDepth(10);
 
     this.coverage = scene.add
@@ -108,6 +112,12 @@ export class GameHud {
     this.cashText.setText(`CASH  $${Math.round(s.cash)}`);
     this.cashText.setColor(s.cash < TUNING.launchCost ? "#e24b4a" : "#3dd6a0");
     this.valuationText.setText(`VALUATION  $${Math.round(s.valuation)}`);
+    this.valuationSub.setText(
+      s.nextUnlock
+        ? `unlocks ${s.nextUnlock.name} at $${s.nextUnlock.at}`
+        : "company worth — your score",
+    );
+    this.siteText.setText(`pad: ${s.siteName}   (1/2/3 or TAB to switch)`);
 
     if (s.sats >= s.satCap) {
       this.launchStatus.setText(`launch — fleet full (${s.sats}/${s.satCap})`);

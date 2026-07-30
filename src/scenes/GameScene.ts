@@ -21,6 +21,8 @@ import {
   type BodyState,
 } from "../core/orbit";
 import { accrueRevenue, canAfford, isBankrupt, spend, type Wallet } from "../core/economy";
+import { BANDS, bandFor, footprintHalfWidthFor, rateMultiplier } from "../sim/bands";
+import { SITES, siteById, sitesUnlockedFor, type SiteDef } from "../sim/sites";
 
 const COL = {
   earth: 0x17457f,
@@ -38,9 +40,6 @@ const COL = {
   pad: 0xe6ecf5,
   guide: 0x2b3a56,
 } as const;
-
-// The single launch site of stage 2, fixed in the Earth frame.
-const SITE_ANGLE = -Math.PI / 2; // "north" at boot; rotates with the planet
 
 const FONT = "ui-monospace, monospace";
 
@@ -63,14 +62,21 @@ export class GameScene extends Phaser.Scene {
   private earthSpin = 0;
   private covered = false;
   private coverageLinger = 0;
+  // Band rate multiplier of whoever is currently serving the region.
+  private coverageRateMult = 1;
   private landmasses: { angle: number; dist: number; pts: { x: number; y: number }[] }[] = [];
 
-  // Launch console state. fpaDeg 0 = tangential/ideal; power is the 0..1 dial.
+  // Launch console state. fpaDeg 0 = tangential/ideal; power is the 0..1 dial
+  // (clamped by the active site's maxPower).
   private consoleOpen = false;
   private fpaDeg = 0;
   private power = 0.3;
   private consoleText!: Phaser.GameObjects.Text;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
+
+  // Progression: which sites valuation has unlocked, and which is active.
+  private activeSiteId: string = SITES[0].id;
+  private unlockedIds = new Set<string>([SITES[0].id]);
 
   private paused = false;
   private gameOver = false;
@@ -102,9 +108,12 @@ export class GameScene extends Phaser.Scene {
     this.earthSpin = 0;
     this.covered = false;
     this.coverageLinger = 0;
+    this.coverageRateMult = 1;
     this.consoleOpen = false;
     this.fpaDeg = 0;
     this.power = 0.3;
+    this.activeSiteId = SITES[0].id;
+    this.unlockedIds = new Set(sitesUnlockedFor(0).map((s) => s.id));
     this.paused = this.cfg.paused;
     this.gameOver = false;
     this.gameOverReason = null;
@@ -132,11 +141,16 @@ export class GameScene extends Phaser.Scene {
       launch: (fpaDeg, power) => this.doLaunch(fpaDeg, power),
       boost: (id) => this.doBoost(id),
       deorbit: (id) => this.doDeorbit(id),
+      selectSite: (siteId) => this.doSelectSite(siteId),
       pause: () => this.togglePause(),
     });
     bus.bindCheats({
       addCash: (amount) => {
         this.wallet.cash += amount;
+      },
+      addValuation: (amount) => {
+        this.wallet.valuation += amount;
+        this.checkUnlocks();
       },
       spawnSat: (angle, radius, vFactor = 1) => this.cheatSpawnSat(angle, radius, vFactor),
       spawnDebris: (angle, radius, vFactor = 1) =>
@@ -164,6 +178,13 @@ export class GameScene extends Phaser.Scene {
     kb.on("keydown-ENTER", () => {
       if (this.consoleOpen) this.doLaunch(this.fpaDeg, this.power);
     });
+    // Number keys pick a launch site; TAB cycles the unlocked ones.
+    SITES.forEach((site, i) => {
+      kb.on(`keydown-${["ONE", "TWO", "THREE"][i] ?? `NUMPAD_${i + 1}`}`, () =>
+        this.doSelectSite(site.id),
+      );
+    });
+    kb.on("keydown-TAB", () => this.cycleSite());
 
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       if (this.gameOver) return;
@@ -190,8 +211,13 @@ export class GameScene extends Phaser.Scene {
     this.consoleText.setVisible(false);
   }
 
-  private siteScreenAngle(): number {
-    return normalizeAngle(this.earthSpin + SITE_ANGLE);
+  private activeSite(): SiteDef {
+    return siteById(this.activeSiteId) ?? SITES[0];
+  }
+
+  // Pads are fixed in the Earth frame, so they rotate with the planet.
+  private siteScreenAngle(site: SiteDef = this.activeSite()): number {
+    return normalizeAngle(this.earthSpin + site.angle);
   }
 
   private consoleBurnout(): BodyState {
@@ -207,6 +233,53 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
+  // Switch pads. Better sites lift the power ceiling — that's the progression.
+  private doSelectSite(siteId: string): void {
+    if (this.gameOver) return;
+    const site = siteById(siteId);
+    if (!site) {
+      this.blocked("select-site", "unknown", `no such launch site`);
+      return;
+    }
+    if (!this.unlockedIds.has(site.id)) {
+      this.blocked(
+        "select-site",
+        "locked",
+        `${site.name} locked — needs $${site.unlockValuation} valuation`,
+      );
+      return;
+    }
+    this.activeSiteId = site.id;
+    this.power = Math.min(this.power, site.maxPower);
+    this.hud.toast(`launching from ${site.name}`);
+    this.pushSnapshot();
+  }
+
+  // The next site valuation hasn't bought yet — the progression carrot.
+  private nextUnlock(): { name: string; at: number } | null {
+    const locked = SITES.filter((s) => !this.unlockedIds.has(s.id));
+    if (!locked.length) return null;
+    const next = locked.reduce((a, b) => (a.unlockValuation <= b.unlockValuation ? a : b));
+    return { name: next.name, at: next.unlockValuation };
+  }
+
+  private cycleSite(): void {
+    const open = SITES.filter((s) => this.unlockedIds.has(s.id));
+    if (open.length < 2) return;
+    const idx = open.findIndex((s) => s.id === this.activeSiteId);
+    this.doSelectSite(open[(idx + 1) % open.length].id);
+  }
+
+  // Valuation is the unlock currency: crossing a site's threshold opens it.
+  private checkUnlocks(): void {
+    for (const site of sitesUnlockedFor(this.wallet.valuation)) {
+      if (this.unlockedIds.has(site.id)) continue;
+      this.unlockedIds.add(site.id);
+      getEventBus().emit({ type: "site-unlocked", t: 0, siteId: site.id });
+      this.hud.toast(`${site.name} unlocked — press ${SITES.indexOf(site) + 1} to use it`);
+    }
+  }
+
   // ----- actions -----
 
   private doLaunch(fpaDeg: number, power: number): void {
@@ -220,11 +293,13 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const L = TUNING.launch;
+    const site = this.activeSite();
     const fpa = Phaser.Math.Clamp(fpaDeg, L.fpaMinDeg, L.fpaMaxDeg);
-    const pow = Phaser.Math.Clamp(power, 0, 1);
+    // The site caps how hard you can throw — a basic pad can't reach GEO.
+    const pow = Phaser.Math.Clamp(power, 0, site.maxPower);
     this.wallet.cash = spend(this.wallet.cash, TUNING.launchCost);
 
-    const siteAngle = this.siteScreenAngle();
+    const siteAngle = this.siteScreenAngle(site);
     const speed = L.minSpeed + pow * (L.maxSpeed - L.minSpeed);
     const burnout = burnoutState(
       siteAngle,
@@ -324,8 +399,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private blocked(
-    action: "launch" | "boost" | "deorbit",
-    reason: "cash" | "max-sats" | "no-target",
+    action: "launch" | "boost" | "deorbit" | "select-site",
+    reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown",
     message: string,
   ): void {
     this.hud.toast(message);
@@ -426,7 +501,7 @@ export class GameScene extends Phaser.Scene {
     if (this.cursors.up.isDown) this.power += 0.35 * dt;
     if (this.cursors.down.isDown) this.power -= 0.35 * dt;
     this.fpaDeg = Phaser.Math.Clamp(this.fpaDeg, L.fpaMinDeg, L.fpaMaxDeg);
-    this.power = Phaser.Math.Clamp(this.power, 0, 1);
+    this.power = Phaser.Math.Clamp(this.power, 0, this.activeSite().maxPower);
   }
 
   private step(dt: number): void {
@@ -554,14 +629,22 @@ export class GameScene extends Phaser.Scene {
       this.flashes = this.flashes.filter((f) => f.ttl > 0);
     }
 
-    // Coverage + revenue. A short grace window bridges momentary handoffs.
-    const liveAngles: number[] = [];
+    // Coverage + revenue. Each sat serves through its own band-scaled
+    // footprint: higher orbits see more ground but pay a lower rate (latency).
+    // When several sats cover at once, the best-paying one sets the rate.
+    let rawCovered = false;
+    let rate = 0;
     for (const s of this.sats) {
-      if (s.live && s.ascentRemaining <= 0) liveAngles.push(Math.atan2(s.y, s.x));
+      if (!s.live || s.ascentRemaining > 0) continue;
+      const r = Math.hypot(s.x, s.y);
+      const hw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
+      if (!isAngleCovered([Math.atan2(s.y, s.x)], this.regionAngle, hw)) continue;
+      rawCovered = true;
+      rate = Math.max(rate, rateMultiplier(r));
     }
-    const rawCovered = isAngleCovered(liveAngles, this.regionAngle, TUNING.footprintHalfWidth);
     if (rawCovered) {
       this.coverageLinger = TUNING.coverageGraceSec;
+      this.coverageRateMult = rate;
     } else {
       this.coverageLinger = Math.max(0, this.coverageLinger - dt);
     }
@@ -571,7 +654,8 @@ export class GameScene extends Phaser.Scene {
     this.covered = nowCovered;
 
     if (nowCovered) {
-      this.wallet = accrueRevenue(this.wallet, TUNING.coverageRate, dt);
+      this.wallet = accrueRevenue(this.wallet, TUNING.coverageRate * this.coverageRateMult, dt);
+      this.checkUnlocks();
       this.revenueAccum += dt;
       if (this.revenueAccum >= 0.5) {
         this.revenueAccum = 0;
@@ -603,6 +687,12 @@ export class GameScene extends Phaser.Scene {
   private render(): void {
     const g = this.gfx;
     g.clear();
+
+    // Band guide rings — where LEO / MEO / GEO sit.
+    for (const b of BANDS) {
+      g.lineStyle(1, COL.guide, 0.6);
+      g.strokeCircle(this.cx, this.cy, b.radius);
+    }
 
     // Atmosphere: the drag zone, visible so a dipping perigee reads as danger.
     g.fillStyle(COL.atmosphere, 0.07);
@@ -638,12 +728,20 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(1.5, COL.atmosphere, 0.5);
     g.strokeCircle(this.cx, this.cy, TUNING.earthRadius);
 
-    // Launch pad marker.
-    const siteAngle = this.siteScreenAngle();
-    const pad = pointOnCircle(this.cx, this.cy, TUNING.earthRadius + 2, siteAngle);
-    const padOut = pointOnCircle(this.cx, this.cy, TUNING.earthRadius + 9, siteAngle);
-    g.lineStyle(3, COL.pad, 1);
-    g.lineBetween(pad.x, pad.y, padOut.x, padOut.y);
+    // Launch pads: active one bright, unlocked dim, locked dimmer still.
+    for (const site of SITES) {
+      const a = this.siteScreenAngle(site);
+      const inner = pointOnCircle(this.cx, this.cy, TUNING.earthRadius + 2, a);
+      const active = site.id === this.activeSiteId;
+      const unlocked = this.unlockedIds.has(site.id);
+      const outer = pointOnCircle(this.cx, this.cy, TUNING.earthRadius + (active ? 11 : 7), a);
+      g.lineStyle(
+        active ? 3 : 2,
+        unlocked ? COL.pad : COL.guide,
+        active ? 1 : unlocked ? 0.5 : 0.35,
+      );
+      g.lineBetween(inner.x, inner.y, outer.x, outer.y);
+    }
 
     // Launch console: predicted trajectory + aim/power readout.
     if (this.consoleOpen && !this.gameOver) this.renderConsole(g);
@@ -714,6 +812,8 @@ export class GameScene extends Phaser.Scene {
       kesslerRisk: Math.min(1, this.debris.length / TUNING.kesslerCap),
       paused: this.paused,
       consoleOpen: this.consoleOpen,
+      siteName: this.activeSite().name,
+      nextUnlock: this.nextUnlock(),
     });
 
     if (this.gameOver && this.gameOverReason) {
@@ -746,18 +846,21 @@ export class GameScene extends Phaser.Scene {
     g.strokeCircle(b.x, b.y, 4);
 
     const L = TUNING.launch;
+    const site = this.activeSite();
     const speed = Math.round(L.minSpeed + this.power * (L.maxSpeed - L.minSpeed));
+    const atCap = this.power >= site.maxPower - 0.001 && site.maxPower < 1;
     const verdict =
       path.outcome === "crashed"
         ? "re-enters — will not orbit"
         : path.outcome === "escaped"
           ? "escape velocity — lost to space"
           : stable
-            ? `orbit ${Math.round(el.perigee)}×${Math.round(el.apogee)}`
+            ? `${bandFor(el.apogee).label} orbit ${Math.round(el.perigee)}×${Math.round(el.apogee)}`
             : `low perigee ${Math.round(el.perigee)} — will decay`;
     this.consoleText.setText(
-      `LAUNCH CONSOLE   aim ${this.fpaDeg.toFixed(0)}°  power ${speed}   →  ${verdict}\n` +
-        `←→ aim · ↑↓ power · ENTER launch ($${TUNING.launchCost}) · ESC close`,
+      `${site.name.toUpperCase()}   aim ${this.fpaDeg.toFixed(0)}°  power ${speed}` +
+        `${atCap ? " (pad max)" : ""}   →  ${verdict}\n` +
+        `←→ aim · ↑↓ power · ENTER launch ($${TUNING.launchCost}) · TAB pad · ESC close`,
     );
     this.consoleText.setColor(
       color === COL.healthy ? "#3dd6a0" : color === COL.warn ? "#ef9f27" : "#e24b4a",
@@ -810,6 +913,8 @@ export class GameScene extends Phaser.Scene {
       satellites: live,
       minPerigee: live ? minPerigee : 0,
       fleet,
+      activeSite: this.activeSiteId,
+      unlockedSites: SITES.filter((s) => this.unlockedIds.has(s.id)).map((s) => s.id),
       debris: this.debris.length,
       kesslerRisk: Math.min(1, this.debris.length / TUNING.kesslerCap),
       timeScale: this.cfg.timeScale,
