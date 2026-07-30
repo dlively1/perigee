@@ -12,6 +12,7 @@ export interface HudState {
   debris: number;
   kesslerRisk: number;
   paused: boolean;
+  consoleOpen: boolean;
 }
 
 // Always-on overlay built for legibility: every number says what it is and
@@ -77,11 +78,16 @@ export class GameHud {
     this.kesslerBar = scene.add.rectangle(barX, 84, 0, 8, 0xe24b4a).setOrigin(0, 0).setDepth(10);
 
     scene.add
-      .text(w / 2, w - 20, "click: launch  ·  select + B: boost  ·  D: de-orbit  ·  SPACE: pause", {
-        fontFamily: FONT,
-        fontSize: "13px",
-        color: "#5f6f88",
-      })
+      .text(
+        w / 2,
+        w - 20,
+        "L: launch console  ·  click sat + B: boost  ·  D: de-orbit  ·  SPACE: pause",
+        {
+          fontFamily: FONT,
+          fontSize: "13px",
+          color: "#5f6f88",
+        },
+      )
       .setOrigin(0.5, 1)
       .setDepth(10);
 
@@ -109,8 +115,11 @@ export class GameHud {
     } else if (s.cash < TUNING.launchCost) {
       this.launchStatus.setText(`launch $${TUNING.launchCost} — need more cash`);
       this.launchStatus.setColor("#e24b4a");
+    } else if (s.consoleOpen) {
+      this.launchStatus.setText(`launch console open — aim, then ENTER to fire`);
+      this.launchStatus.setColor("#97c459");
     } else {
-      this.launchStatus.setText(`launch $${TUNING.launchCost} — ready (click the ring)`);
+      this.launchStatus.setText(`launch $${TUNING.launchCost} — press L to open the console`);
       this.launchStatus.setColor("#97c459");
     }
 

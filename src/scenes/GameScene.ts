@@ -3,20 +3,22 @@ import { Rng } from "../agent/rng";
 import { readAgentConfig, type AgentConfig } from "../agent/config";
 import { getEventBus } from "../agent/events";
 import { GameHud } from "../ui/GameHud";
-import { TUNING } from "../sim/constants";
+import { TUNING, DRAG } from "../sim/constants";
 import { createSatellite, type Satellite } from "../sim/Satellite";
 import { createDebris, type Debris, type DebrisSource } from "../sim/Debris";
 import {
   TWO_PI,
   advanceAngle,
-  boostAltitude,
-  clamp01,
-  decayAltitude,
+  ascentPoint,
+  burnoutState,
+  circularSpeed,
   isAngleCovered,
   normalizeAngle,
-  orbitRadius,
+  orbitalElements,
   pointOnCircle,
-  willCollide,
+  predictPath,
+  stepBody,
+  type BodyState,
 } from "../core/orbit";
 import { accrueRevenue, canAfford, isBankrupt, spend, type Wallet } from "../core/economy";
 
@@ -24,7 +26,6 @@ const COL = {
   earth: 0x17457f,
   earthLand: 0x2e7d5b,
   atmosphere: 0x4a90d9,
-  ring: 0x2b3a56,
   healthy: 0x3dd6a0,
   warn: 0xef9f27,
   danger: 0xe24b4a,
@@ -34,7 +35,14 @@ const COL = {
   select: 0xffffff,
   debris: 0xd85a30,
   flash: 0xffd27a,
+  pad: 0xe6ecf5,
+  guide: 0x2b3a56,
 } as const;
+
+// The single launch site of stage 2, fixed in the Earth frame.
+const SITE_ANGLE = -Math.PI / 2; // "north" at boot; rotates with the planet
+
+const FONT = "ui-monospace, monospace";
 
 export class GameScene extends Phaser.Scene {
   private cfg!: AgentConfig;
@@ -52,13 +60,17 @@ export class GameScene extends Phaser.Scene {
 
   private wallet: Wallet = { cash: TUNING.startingCash, valuation: 0 };
   private regionAngle = 0; // contract region's ground angle (rotates with Earth)
-  private earthSpin = 0; // cosmetic land rotation
+  private earthSpin = 0;
   private covered = false;
-  // Seconds of coverage grace remaining — brief handoff gaps don't cut revenue.
   private coverageLinger = 0;
-  // Seeded landmass polygons (local vertex offsets around an orbiting center),
-  // generated once per run so the planet reads as continents, not spots.
   private landmasses: { angle: number; dist: number; pts: { x: number; y: number }[] }[] = [];
+
+  // Launch console state. fpaDeg 0 = tangential/ideal; power is the 0..1 dial.
+  private consoleOpen = false;
+  private fpaDeg = 0;
+  private power = 0.3;
+  private consoleText!: Phaser.GameObjects.Text;
+  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
 
   private paused = false;
   private gameOver = false;
@@ -67,11 +79,9 @@ export class GameScene extends Phaser.Scene {
 
   private revenueAccum = 0;
   private lastFrameEmit = 0;
-  // Ambient-debris scheduler (seeded): time accumulated + gap until next drop.
   private ambientTimer = 0;
   private ambientNextGap: number = TUNING.ambientFirstSec;
-  // Transient collision flashes for rendering: {angle, radius, ttl}.
-  private flashes: { angle: number; radius: number; ttl: number }[] = [];
+  private flashes: { x: number; y: number; ttl: number }[] = [];
 
   constructor() {
     super("game");
@@ -92,7 +102,9 @@ export class GameScene extends Phaser.Scene {
     this.earthSpin = 0;
     this.covered = false;
     this.coverageLinger = 0;
-    this.buildLandmasses();
+    this.consoleOpen = false;
+    this.fpaDeg = 0;
+    this.power = 0.3;
     this.paused = this.cfg.paused;
     this.gameOver = false;
     this.gameOverReason = null;
@@ -100,14 +112,24 @@ export class GameScene extends Phaser.Scene {
     this.revenueAccum = 0;
     this.ambientTimer = 0;
     this.ambientNextGap = TUNING.ambientFirstSec;
+    this.buildLandmasses();
 
     this.gfx = this.add.graphics();
     this.hud = new GameHud(this);
+    this.consoleText = this.add
+      .text(this.cx, TUNING.surface - 74, "", {
+        fontFamily: FONT,
+        fontSize: "14px",
+        color: "#e6ecf5",
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(11)
+      .setVisible(false);
 
     this.bindInput();
 
     bus.bindInput({
-      launch: (angle) => this.doLaunch(angle),
+      launch: (fpaDeg, power) => this.doLaunch(fpaDeg, power),
       boost: (id) => this.doBoost(id),
       deorbit: (id) => this.doDeorbit(id),
       pause: () => this.togglePause(),
@@ -116,8 +138,14 @@ export class GameScene extends Phaser.Scene {
       addCash: (amount) => {
         this.wallet.cash += amount;
       },
-      spawnDebris: (angle, alt) =>
-        this.addDebris(angle ?? this.rng.range(0, TWO_PI), alt ?? 1, "cheat"),
+      spawnSat: (angle, radius, vFactor = 1) => this.cheatSpawnSat(angle, radius, vFactor),
+      spawnDebris: (angle, radius, vFactor = 1) =>
+        this.spawnDebrisBody(
+          angle ?? this.rng.range(0, TWO_PI),
+          radius ?? this.rng.range(TUNING.ambientRadiusMin, TUNING.ambientRadiusMax),
+          vFactor,
+          "cheat",
+        ),
     });
 
     bus.emit({ type: "scene", t: 0, name: "game" });
@@ -126,11 +154,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   private bindInput(): void {
-    const kb = this.input.keyboard;
-    kb?.on("keydown-SPACE", () => this.togglePause());
-    kb?.on("keydown-B", () => this.doBoost());
-    kb?.on("keydown-D", () => this.doDeorbit());
-    kb?.on("keydown-L", () => this.doLaunch(this.pointerAngle()));
+    const kb = this.input.keyboard!;
+    this.cursors = kb.createCursorKeys();
+    kb.on("keydown-SPACE", () => this.togglePause());
+    kb.on("keydown-B", () => this.doBoost());
+    kb.on("keydown-D", () => this.doDeorbit());
+    kb.on("keydown-L", () => this.toggleConsole());
+    kb.on("keydown-ESC", () => this.closeConsole());
+    kb.on("keydown-ENTER", () => {
+      if (this.consoleOpen) this.doLaunch(this.fpaDeg, this.power);
+    });
 
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       if (this.gameOver) return;
@@ -139,14 +172,44 @@ export class GameScene extends Phaser.Scene {
         this.selectedId = hit.id;
         this.hud.toast(`sat #${hit.id} selected — B to boost, D to de-orbit`);
       } else {
-        this.doLaunch(Math.atan2(p.y - this.cy, p.x - this.cx));
+        this.selectedId = null;
       }
     });
   }
 
+  // ----- launch console -----
+
+  private toggleConsole(): void {
+    if (this.gameOver) return;
+    this.consoleOpen = !this.consoleOpen;
+    this.consoleText.setVisible(this.consoleOpen);
+  }
+
+  private closeConsole(): void {
+    this.consoleOpen = false;
+    this.consoleText.setVisible(false);
+  }
+
+  private siteScreenAngle(): number {
+    return normalizeAngle(this.earthSpin + SITE_ANGLE);
+  }
+
+  private consoleBurnout(): BodyState {
+    const L = TUNING.launch;
+    const speed = L.minSpeed + this.power * (L.maxSpeed - L.minSpeed);
+    return burnoutState(
+      this.siteScreenAngle(),
+      L.downrangeRad,
+      L.burnoutRadius,
+      speed,
+      (this.fpaDeg * Math.PI) / 180,
+      TUNING.earthOmega,
+    );
+  }
+
   // ----- actions -----
 
-  private doLaunch(angle: number): void {
+  private doLaunch(fpaDeg: number, power: number): void {
     if (this.gameOver) return;
     if (this.sats.length >= TUNING.maxSatellites) {
       this.blocked("launch", "max-sats", `fleet full — ${TUNING.maxSatellites} sats max`);
@@ -156,19 +219,30 @@ export class GameScene extends Phaser.Scene {
       this.blocked("launch", "cash", `launch costs $${TUNING.launchCost} — not enough cash`);
       return;
     }
+    const L = TUNING.launch;
+    const fpa = Phaser.Math.Clamp(fpaDeg, L.fpaMinDeg, L.fpaMaxDeg);
+    const pow = Phaser.Math.Clamp(power, 0, 1);
     this.wallet.cash = spend(this.wallet.cash, TUNING.launchCost);
-    const sat = createSatellite(
-      this.nextId++,
-      normalizeAngle(angle),
-      TUNING.launchAltitude,
-      TUNING.insertSeconds,
+
+    const siteAngle = this.siteScreenAngle();
+    const speed = L.minSpeed + pow * (L.maxSpeed - L.minSpeed);
+    const burnout = burnoutState(
+      siteAngle,
+      L.downrangeRad,
+      L.burnoutRadius,
+      speed,
+      (fpa * Math.PI) / 180,
+      TUNING.earthOmega,
     );
+    const pad = pointOnCircle(0, 0, TUNING.earthRadius, siteAngle);
+    const sat = createSatellite(this.nextId++, burnout, pad.x, pad.y, L.ascentSeconds);
     this.sats.push(sat);
     getEventBus().emit({
       type: "launch",
       t: 0,
       id: sat.id,
-      angle: sat.angle,
+      fpa,
+      power: pow,
       cost: TUNING.launchCost,
     });
     this.pushSnapshot();
@@ -176,7 +250,7 @@ export class GameScene extends Phaser.Scene {
 
   private doBoost(id?: number): void {
     if (this.gameOver) return;
-    const target = id != null ? this.sats.find((s) => s.id === id && s.live) : this.mostUrgent();
+    const target = this.pickTarget(id);
     if (!target) {
       this.blocked("boost", "no-target", "no satellite to boost");
       return;
@@ -186,15 +260,25 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     this.wallet.cash = spend(this.wallet.cash, TUNING.boostCost);
-    target.alt = boostAltitude(target.alt, TUNING.boostAmount);
-    if (target.alt >= TUNING.criticalAltitude) target.critical = false;
+    const sp = Math.hypot(target.vx, target.vy) || 1;
+    target.vx += (target.vx / sp) * TUNING.boostDv;
+    target.vy += (target.vy / sp) * TUNING.boostDv;
+    const el = orbitalElements(TUNING.mu, target);
+    target.perigee = el.perigee;
+    target.apogee = el.apogee;
+    if (el.perigee >= TUNING.criticalPerigee) target.critical = false;
     getEventBus().emit({
       type: "boost",
       t: 0,
       id: target.id,
-      altitude: target.alt,
+      dv: TUNING.boostDv,
+      perigee: el.perigee,
       cost: TUNING.boostCost,
     });
+    // Teach the timing skill: a prograde burn raises the OPPOSITE side.
+    const shape = `${Math.round(el.perigee)}×${Math.round(el.apogee)}`;
+    const hint = el.apogee > el.perigee * 1.3 ? " — boost near apogee to raise the perigee" : "";
+    this.hud.toast(`sat #${target.id} boosted — orbit ${shape}${hint}`);
     this.pushSnapshot();
   }
 
@@ -202,12 +286,7 @@ export class GameScene extends Phaser.Scene {
   // gets hit — the counter-play to Kessler, since it leaves no debris.
   private doDeorbit(id?: number): void {
     if (this.gameOver) return;
-    const target =
-      id != null
-        ? this.sats.find((s) => s.id === id && s.live)
-        : this.selectedId != null
-          ? this.sats.find((s) => s.id === this.selectedId && s.live)
-          : this.mostUrgent();
+    const target = this.pickTarget(id);
     if (!target) {
       this.blocked("deorbit", "no-target", "no satellite to de-orbit");
       return;
@@ -223,13 +302,27 @@ export class GameScene extends Phaser.Scene {
     this.pushSnapshot();
   }
 
+  // id → that sat; else selected; else the lowest-perigee live sat.
+  private pickTarget(id?: number): Satellite | undefined {
+    if (id != null) return this.sats.find((s) => s.id === id && s.live);
+    if (this.selectedId != null) {
+      const sel = this.sats.find((s) => s.id === this.selectedId && s.live);
+      if (sel) return sel;
+    }
+    let best: Satellite | undefined;
+    for (const s of this.sats) {
+      if (!s.live) continue;
+      if (!best || s.perigee < best.perigee) best = s;
+    }
+    return best;
+  }
+
   private togglePause(): void {
     if (this.gameOver) return;
     this.paused = !this.paused;
     getEventBus().updateSnapshot({ paused: this.paused });
   }
 
-  // Report a refused order: toast for the player, typed event for agents.
   private blocked(
     action: "launch" | "boost" | "deorbit",
     reason: "cash" | "max-sats" | "no-target",
@@ -239,11 +332,8 @@ export class GameScene extends Phaser.Scene {
     getEventBus().emit({ type: "action-blocked", t: 0, action, reason });
   }
 
-  // Seeded blobby polygons that always stay inside the planet disc — continents
-  // instead of the old floating circles.
   private buildLandmasses(): void {
     this.landmasses = [];
-    // Keep sampling until a few continents actually fit (bounded attempts).
     for (let i = 0; i < 14 && this.landmasses.length < 4; i++) {
       const angle = this.rng.range(0, TWO_PI);
       const dist = this.rng.range(0, TUNING.earthRadius * 0.5);
@@ -260,18 +350,47 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private addDebris(angle: number, alt: number, source: DebrisSource): void {
+  private cheatSpawnSat(angle: number, radius: number, vFactor: number): void {
+    if (this.sats.length >= TUNING.maxSatellites) return;
+    const state = this.onOrbitState(angle, radius, vFactor);
+    const sat = createSatellite(this.nextId++, state, state.x, state.y, 0);
+    const el = orbitalElements(TUNING.mu, sat);
+    sat.perigee = el.perigee;
+    sat.apogee = el.apogee;
+    sat.live = el.perigee >= TUNING.insertFloor && el.e < 1;
+    this.sats.push(sat);
+    this.pushSnapshot();
+  }
+
+  private onOrbitState(angle: number, radius: number, vFactor: number): BodyState {
+    const v = circularSpeed(TUNING.mu, radius) * vFactor;
+    const p = pointOnCircle(0, 0, radius, angle);
+    return { x: p.x, y: p.y, vx: -Math.sin(angle) * v, vy: Math.cos(angle) * v };
+  }
+
+  private spawnDebrisBody(
+    angle: number,
+    radius: number,
+    vFactor: number,
+    source: DebrisSource,
+  ): void {
     if (this.debris.length >= TUNING.maxDebris) return;
-    const omega = TUNING.satOmega * TUNING.debrisOmegaFactor;
-    const d = createDebris(this.nextId++, normalizeAngle(angle), clamp01(alt), omega, source);
+    const d = createDebris(this.nextId++, this.onOrbitState(angle, radius, vFactor), source);
     this.debris.push(d);
-    getEventBus().emit({ type: "debris-spawn", t: 0, id: d.id, angle: d.angle, source });
+    getEventBus().emit({
+      type: "debris-spawn",
+      t: 0,
+      id: d.id,
+      angle: normalizeAngle(angle),
+      source,
+    });
   }
 
   private endGame(reason: "bankruptcy" | "kessler"): void {
     if (this.gameOver) return;
     this.gameOver = true;
     this.gameOverReason = reason;
+    this.closeConsole();
     const bus = getEventBus();
     if (reason === "bankruptcy") {
       this.wallet.cash = 0;
@@ -282,23 +401,16 @@ export class GameScene extends Phaser.Scene {
     bus.emit({ type: "game-over", t: 0, reason, valuation: this.wallet.valuation });
   }
 
-  private mostUrgent(): Satellite | undefined {
-    let best: Satellite | undefined;
-    for (const s of this.sats) {
-      if (!s.live) continue;
-      if (!best || s.alt < best.alt) best = s;
-    }
-    return best;
-  }
-
   // ----- loop -----
 
   update(_time: number, delta: number): void {
+    const rawDt = Math.min(delta, 100) / 1000;
     if (!this.gameOver && !this.paused) {
-      // Clamp the frame delta so a backgrounded tab can't teleport the sim.
-      const dt = (Math.min(delta, 100) / 1000) * this.cfg.timeScale;
-      this.step(dt);
+      this.step(rawDt * this.cfg.timeScale);
     }
+    // The console stays interactive even while paused — that's the strategy
+    // layer: freeze time, plan the burn, fire.
+    if (this.consoleOpen && !this.gameOver) this.updateConsole(rawDt);
     this.render();
     this.emitFrame();
 
@@ -307,101 +419,146 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  private updateConsole(dt: number): void {
+    const L = TUNING.launch;
+    if (this.cursors.left.isDown) this.fpaDeg -= 30 * dt;
+    if (this.cursors.right.isDown) this.fpaDeg += 30 * dt;
+    if (this.cursors.up.isDown) this.power += 0.35 * dt;
+    if (this.cursors.down.isDown) this.power -= 0.35 * dt;
+    this.fpaDeg = Phaser.Math.Clamp(this.fpaDeg, L.fpaMinDeg, L.fpaMaxDeg);
+    this.power = Phaser.Math.Clamp(this.power, 0, 1);
+  }
+
   private step(dt: number): void {
     const bus = getEventBus();
     this.regionAngle = advanceAngle(this.regionAngle, TUNING.earthOmega, dt);
     this.earthSpin = advanceAngle(this.earthSpin, TUNING.earthOmega, dt);
 
-    // Ambient external junk arrives on a seeded schedule — the cascade seed.
+    // Ambient external junk arrives on a seeded schedule into the low band.
     if (this.cfg.debris) {
       this.ambientTimer += dt;
       if (this.ambientTimer >= this.ambientNextGap) {
         this.ambientTimer = 0;
         this.ambientNextGap = this.rng.range(TUNING.ambientMinGapSec, TUNING.ambientMaxGapSec);
-        this.addDebris(this.rng.range(0, TWO_PI), 1, "ambient");
+        this.spawnDebrisBody(
+          this.rng.range(0, TWO_PI),
+          this.rng.range(TUNING.ambientRadiusMin, TUNING.ambientRadiusMax),
+          1 + this.rng.range(-TUNING.ambientSpeedJitter, TUNING.ambientSpeedJitter),
+          "ambient",
+        );
       }
     }
 
-    // Satellites: insert climbing rockets, then orbit + decay the live ones.
-    // A decay death is a clean re-entry — it burns up and leaves NO debris.
-    const deadSats: number[] = [];
+    // Satellites: ride the ascent animation, then live Newtonian flight.
+    const deadSats: { id: number; reason: "decay" | "crash" | "escaped" }[] = [];
     for (const s of this.sats) {
-      if (!s.live) {
-        s.insertRemaining -= dt;
-        if (s.insertRemaining <= 0) {
+      if (s.ascentRemaining > 0) {
+        s.ascentRemaining -= dt;
+        if (s.ascentRemaining > 0) continue;
+        s.ascentRemaining = 0;
+        // Burnout: the stored state becomes real. Stable orbit → live.
+        const el = orbitalElements(TUNING.mu, s);
+        s.perigee = el.perigee;
+        s.apogee = el.apogee;
+        if (el.perigee >= TUNING.insertFloor && el.e < 1) {
           s.live = true;
-          s.insertRemaining = 0;
-          bus.emit({ type: "insert", t: 0, id: s.id, angle: s.angle });
+          bus.emit({ type: "insert", t: 0, id: s.id, perigee: el.perigee, apogee: el.apogee });
         }
         continue;
       }
-      s.angle = advanceAngle(s.angle, TUNING.satOmega, dt);
-      s.alt = decayAltitude(s.alt, TUNING.decayPerSec, dt);
-      if (s.alt <= 0) {
-        deadSats.push(s.id);
-        bus.emit({ type: "deorbit", t: 0, id: s.id, reason: "decay" });
-      } else if (s.alt < TUNING.criticalAltitude && !s.critical) {
+      stepBody(TUNING.mu, s, dt, DRAG);
+      const r = Math.hypot(s.x, s.y);
+      const el = orbitalElements(TUNING.mu, s);
+      s.perigee = el.perigee;
+      s.apogee = el.apogee;
+      if (r <= TUNING.earthRadius + 2) {
+        deadSats.push({ id: s.id, reason: s.live ? "decay" : "crash" });
+      } else if (r > TUNING.escapeRadius) {
+        deadSats.push({ id: s.id, reason: "escaped" });
+      } else if (s.live && el.perigee < TUNING.criticalPerigee && !s.critical) {
         s.critical = true;
-        bus.emit({ type: "decay-critical", t: 0, id: s.id, altitude: s.alt });
+        bus.emit({ type: "decay-critical", t: 0, id: s.id, perigee: el.perigee });
       }
     }
+    for (const d of deadSats) {
+      bus.emit({ type: "deorbit", t: 0, id: d.id, reason: d.reason });
+    }
 
-    // Debris: orbits at its own faster speed and burns up as it decays.
+    // Debris: same physics; burns up or leaves.
     const deadDebris: number[] = [];
     for (const d of this.debris) {
-      d.angle = advanceAngle(d.angle, d.omega, dt);
-      d.alt = decayAltitude(d.alt, TUNING.debrisDecayPerSec, dt);
-      if (d.alt <= 0) {
+      stepBody(TUNING.mu, d, dt, DRAG);
+      const r = Math.hypot(d.x, d.y);
+      if (r <= TUNING.earthRadius + 2 || r > TUNING.escapeRadius) {
         deadDebris.push(d.id);
         bus.emit({ type: "debris-decay", t: 0, id: d.id });
       }
     }
 
-    // Collisions: a live sat struck by debris is destroyed and both shatter
-    // into fragments — this is the multiplier that turns junk into a cascade.
-    const fragments: { angle: number; alt: number }[] = [];
+    // Collisions: proximity in the plane. A hit shatters both into fragments —
+    // the multiplier that turns junk into a cascade.
+    const deadIds = new Set(deadSats.map((d) => d.id));
+    const fragments: BodyState[] = [];
     for (const s of this.sats) {
-      if (!s.live || deadSats.includes(s.id)) continue;
-      const sr = orbitRadius(TUNING.ringRadius, s.alt);
+      if (s.ascentRemaining > 0 || deadIds.has(s.id)) continue;
       for (const d of this.debris) {
         if (deadDebris.includes(d.id)) continue;
-        const dr = orbitRadius(TUNING.ringRadius, d.alt);
-        if (!willCollide(s.angle, sr, d.angle, dr, TUNING.collisionAngle, TUNING.collisionRadius)) {
-          continue;
-        }
-        deadSats.push(s.id);
+        const dx = s.x - d.x;
+        const dy = s.y - d.y;
+        if (dx * dx + dy * dy > TUNING.collisionDist * TUNING.collisionDist) continue;
+        deadIds.add(s.id);
+        deadSats.push({ id: s.id, reason: "decay" }); // marker; event emitted below
         deadDebris.push(d.id);
-        bus.emit({ type: "collision", t: 0, satId: s.id, debrisId: d.id, angle: s.angle });
+        bus.emit({
+          type: "collision",
+          t: 0,
+          satId: s.id,
+          debrisId: d.id,
+          angle: normalizeAngle(Math.atan2(s.y, s.x)),
+        });
         bus.emit({ type: "deorbit", t: 0, id: s.id, reason: "collision" });
-        this.flashes.push({ angle: s.angle, radius: sr, ttl: 0.4 });
-        const n = TUNING.fragmentsPerCollision;
-        for (let i = 0; i < n; i++) {
+        this.flashes.push({ x: s.x, y: s.y, ttl: 0.4 });
+        for (let i = 0; i < TUNING.fragmentsPerCollision; i++) {
           fragments.push({
-            angle: s.angle + (i - (n - 1) / 2) * TUNING.collisionAngle * 2,
-            alt: clamp01(s.alt + this.rng.range(-0.12, 0.12)),
+            x: (s.x + d.x) / 2,
+            y: (s.y + d.y) / 2,
+            vx: (s.vx + d.vx) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
+            vy: (s.vy + d.vy) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
           });
         }
-        break; // this sat is gone; stop checking it against more debris
+        break;
       }
     }
 
-    if (deadSats.length) {
-      this.sats = this.sats.filter((s) => !deadSats.includes(s.id));
-      if (this.selectedId != null && deadSats.includes(this.selectedId)) this.selectedId = null;
+    if (deadIds.size || deadSats.length) {
+      const gone = new Set(deadSats.map((d) => d.id));
+      this.sats = this.sats.filter((s) => !gone.has(s.id));
+      if (this.selectedId != null && gone.has(this.selectedId)) this.selectedId = null;
     }
     if (deadDebris.length) this.debris = this.debris.filter((d) => !deadDebris.includes(d.id));
-    for (const f of fragments) this.addDebris(f.angle, f.alt, "collision");
+    for (const f of fragments) {
+      if (this.debris.length >= TUNING.maxDebris) break;
+      const d = createDebris(this.nextId++, f, "collision");
+      this.debris.push(d);
+      bus.emit({
+        type: "debris-spawn",
+        t: 0,
+        id: d.id,
+        angle: normalizeAngle(Math.atan2(f.y, f.x)),
+        source: "collision",
+      });
+    }
 
-    // Fade collision flashes.
     if (this.flashes.length) {
       for (const f of this.flashes) f.ttl -= dt;
       this.flashes = this.flashes.filter((f) => f.ttl > 0);
     }
 
-    // Coverage + revenue. A short grace window bridges momentary footprint
-    // handoff gaps so evenly-phased constellations don't flicker revenue.
+    // Coverage + revenue. A short grace window bridges momentary handoffs.
     const liveAngles: number[] = [];
-    for (const s of this.sats) if (s.live) liveAngles.push(s.angle);
+    for (const s of this.sats) {
+      if (s.live && s.ascentRemaining <= 0) liveAngles.push(Math.atan2(s.y, s.x));
+    }
     const rawCovered = isAngleCovered(liveAngles, this.regionAngle, TUNING.footprintHalfWidth);
     if (rawCovered) {
       this.coverageLinger = TUNING.coverageGraceSec;
@@ -427,8 +584,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Fail states. Kessler is checked first: a cascade is terminal regardless
-    // of the balance sheet.
+    // Fail states. Kessler first: a cascade is terminal regardless of cash.
     if (this.debris.length >= TUNING.kesslerCap) {
       this.endGame("kessler");
     } else if (isBankrupt(this.wallet.cash)) {
@@ -440,15 +596,21 @@ export class GameScene extends Phaser.Scene {
 
   // ----- rendering -----
 
+  private toScreen(x: number, y: number): { x: number; y: number } {
+    return { x: this.cx + x, y: this.cy + y };
+  }
+
   private render(): void {
     const g = this.gfx;
     g.clear();
 
-    // Orbit ring.
-    g.lineStyle(1, COL.ring, 1);
-    g.strokeCircle(this.cx, this.cy, TUNING.ringRadius);
+    // Atmosphere: the drag zone, visible so a dipping perigee reads as danger.
+    g.fillStyle(COL.atmosphere, 0.07);
+    g.fillCircle(this.cx, this.cy, TUNING.atmosphereCeiling);
+    g.lineStyle(1, COL.atmosphere, 0.25);
+    g.strokeCircle(this.cx, this.cy, TUNING.atmosphereCeiling);
 
-    // Contract region: an arc on Earth's rim, ±footprint, lit when covered.
+    // Contract region arc on the rim.
     const hw = TUNING.footprintHalfWidth;
     g.lineStyle(6, this.covered ? COL.covered : COL.gap, 1);
     g.beginPath();
@@ -462,7 +624,7 @@ export class GameScene extends Phaser.Scene {
     );
     g.strokePath();
 
-    // Earth + slowly rotating continents (seeded polygons, always inside the disc).
+    // Earth + continents.
     g.fillStyle(COL.earth, 1);
     g.fillCircle(this.cx, this.cy, TUNING.earthRadius);
     g.fillStyle(COL.earthLand, 1);
@@ -476,48 +638,60 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(1.5, COL.atmosphere, 0.5);
     g.strokeCircle(this.cx, this.cy, TUNING.earthRadius);
 
-    // Satellites (and climbing rockets).
+    // Launch pad marker.
+    const siteAngle = this.siteScreenAngle();
+    const pad = pointOnCircle(this.cx, this.cy, TUNING.earthRadius + 2, siteAngle);
+    const padOut = pointOnCircle(this.cx, this.cy, TUNING.earthRadius + 9, siteAngle);
+    g.lineStyle(3, COL.pad, 1);
+    g.lineBetween(pad.x, pad.y, padOut.x, padOut.y);
+
+    // Launch console: predicted trajectory + aim/power readout.
+    if (this.consoleOpen && !this.gameOver) this.renderConsole(g);
+
+    // Satellites.
     for (const s of this.sats) {
-      if (!s.live) {
-        const progress = 1 - s.insertRemaining / TUNING.insertSeconds;
-        const r = TUNING.earthRadius + (TUNING.ringRadius - TUNING.earthRadius) * progress;
-        const p = pointOnCircle(this.cx, this.cy, r, s.angle);
-        g.lineStyle(1, COL.rocket, 0.3);
-        g.lineBetween(this.cx, this.cy, p.x, p.y);
+      if (s.ascentRemaining > 0) {
+        const t = 1 - s.ascentRemaining / TUNING.launch.ascentSeconds;
+        const p = ascentPoint(s.padX, s.padY, s.x, s.y, t);
+        const sp = this.toScreen(p.x, p.y);
         g.fillStyle(COL.rocket, 1);
-        g.fillCircle(p.x, p.y, 3);
+        g.fillCircle(sp.x, sp.y, 3);
         continue;
       }
-      const r = orbitRadius(TUNING.ringRadius, s.alt);
-      const p = pointOnCircle(this.cx, this.cy, r, s.angle);
-      const color =
-        s.alt >= 0.5 ? COL.healthy : s.alt >= TUNING.criticalAltitude ? COL.warn : COL.danger;
-
-      // Footprint hint under the sat.
-      g.lineStyle(2, color, 0.25);
-      g.beginPath();
-      g.arc(this.cx, this.cy, r, s.angle - hw, s.angle + hw, false);
-      g.strokePath();
+      const sp = this.toScreen(s.x, s.y);
+      const color = !s.live
+        ? COL.danger
+        : s.perigee >= TUNING.criticalPerigee + 25
+          ? COL.healthy
+          : s.perigee >= TUNING.criticalPerigee
+            ? COL.warn
+            : COL.danger;
 
       if (s.id === this.selectedId) {
         g.lineStyle(2, COL.select, 0.9);
-        g.strokeCircle(p.x, p.y, 11);
+        g.strokeCircle(sp.x, sp.y, 11);
+        // Show where the selected sat's orbit actually goes (drag included).
+        const path = predictPath(TUNING.mu, s, DRAG, 14, TUNING.escapeRadius, 8, 0.03);
+        g.fillStyle(COL.select, 0.35);
+        for (const pt of path.points) {
+          const q = this.toScreen(pt.x, pt.y);
+          g.fillCircle(q.x, q.y, 1);
+        }
       }
       g.fillStyle(color, 1);
-      g.fillRect(p.x - 6, p.y - 6, 12, 12);
+      g.fillRect(sp.x - 6, sp.y - 6, 12, 12);
     }
 
-    // Debris — small tumbling diamonds in the danger colour.
+    // Debris.
     g.fillStyle(COL.debris, 1);
     for (const d of this.debris) {
-      const r = orbitRadius(TUNING.ringRadius, d.alt);
-      const p = pointOnCircle(this.cx, this.cy, r, d.angle);
+      const sp = this.toScreen(d.x, d.y);
       g.fillPoints(
         [
-          { x: p.x, y: p.y - 4 },
-          { x: p.x + 4, y: p.y },
-          { x: p.x, y: p.y + 4 },
-          { x: p.x - 4, y: p.y },
+          { x: sp.x, y: sp.y - 4 },
+          { x: sp.x + 4, y: sp.y },
+          { x: sp.x, y: sp.y + 4 },
+          { x: sp.x - 4, y: sp.y },
         ],
         true,
       );
@@ -525,9 +699,9 @@ export class GameScene extends Phaser.Scene {
 
     // Collision flashes.
     for (const f of this.flashes) {
-      const p = pointOnCircle(this.cx, this.cy, f.radius, f.angle);
+      const sp = this.toScreen(f.x, f.y);
       g.lineStyle(2, COL.flash, Math.max(0, f.ttl / 0.4));
-      g.strokeCircle(p.x, p.y, 16 * (1 - f.ttl / 0.4) + 6);
+      g.strokeCircle(sp.x, sp.y, 16 * (1 - f.ttl / 0.4) + 6);
     }
 
     this.hud.update({
@@ -539,6 +713,7 @@ export class GameScene extends Phaser.Scene {
       debris: this.debris.length,
       kesslerRisk: Math.min(1, this.debris.length / TUNING.kesslerCap),
       paused: this.paused,
+      consoleOpen: this.consoleOpen,
     });
 
     if (this.gameOver && this.gameOverReason) {
@@ -546,21 +721,58 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  // ----- helpers -----
+  private renderConsole(g: Phaser.GameObjects.Graphics): void {
+    const burnout = this.consoleBurnout();
+    const path = predictPath(TUNING.mu, burnout, DRAG, 16, TUNING.escapeRadius, 6, 0.025);
+    const el = orbitalElements(TUNING.mu, burnout);
+    const stable = el.e < 1 && el.perigee >= TUNING.insertFloor;
+    const color =
+      path.outcome === "crashed"
+        ? COL.danger
+        : path.outcome === "escaped"
+          ? COL.warn
+          : stable
+            ? COL.healthy
+            : COL.warn;
 
-  private pointerAngle(): number {
-    const p = this.input.activePointer;
-    return Math.atan2(p.y - this.cy, p.x - this.cx);
+    g.fillStyle(color, 0.5);
+    for (const pt of path.points) {
+      const q = this.toScreen(pt.x, pt.y);
+      g.fillCircle(q.x, q.y, 1.4);
+    }
+    // Burnout point marker.
+    const b = this.toScreen(burnout.x, burnout.y);
+    g.lineStyle(1.5, color, 0.9);
+    g.strokeCircle(b.x, b.y, 4);
+
+    const L = TUNING.launch;
+    const speed = Math.round(L.minSpeed + this.power * (L.maxSpeed - L.minSpeed));
+    const verdict =
+      path.outcome === "crashed"
+        ? "re-enters — will not orbit"
+        : path.outcome === "escaped"
+          ? "escape velocity — lost to space"
+          : stable
+            ? `orbit ${Math.round(el.perigee)}×${Math.round(el.apogee)}`
+            : `low perigee ${Math.round(el.perigee)} — will decay`;
+    this.consoleText.setText(
+      `LAUNCH CONSOLE   aim ${this.fpaDeg.toFixed(0)}°  power ${speed}   →  ${verdict}\n` +
+        `←→ aim · ↑↓ power · ENTER launch ($${TUNING.launchCost}) · ESC close`,
+    );
+    this.consoleText.setColor(
+      color === COL.healthy ? "#3dd6a0" : color === COL.warn ? "#ef9f27" : "#e24b4a",
+    );
   }
+
+  // ----- helpers -----
 
   private satNearScreen(x: number, y: number): Satellite | undefined {
     let best: Satellite | undefined;
     let bestD = 24 * 24;
     for (const s of this.sats) {
-      if (!s.live) continue;
-      const r = orbitRadius(TUNING.ringRadius, s.alt);
-      const p = pointOnCircle(this.cx, this.cy, r, s.angle);
-      const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+      if (s.ascentRemaining > 0) continue;
+      const sp = this.toScreen(s.x, s.y);
+      const d = (sp.x - x) * (sp.x - x) + (sp.y - y) * (sp.y - y);
       if (d < bestD) {
         bestD = d;
         best = s;
@@ -577,12 +789,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   private pushSnapshot(): void {
-    let minAlt = 1;
+    let minPerigee = Infinity;
     let live = 0;
+    const fleet: { id: number; live: boolean; perigee: number; apogee: number }[] = [];
     for (const s of this.sats) {
+      fleet.push({ id: s.id, live: s.live, perigee: s.perigee, apogee: s.apogee });
       if (!s.live) continue;
       live++;
-      if (s.alt < minAlt) minAlt = s.alt;
+      if (s.perigee < minPerigee) minPerigee = s.perigee;
     }
     getEventBus().updateSnapshot({
       ready: true,
@@ -594,7 +808,8 @@ export class GameScene extends Phaser.Scene {
       valuation: this.wallet.valuation,
       covered: this.covered,
       satellites: live,
-      minAltitude: minAlt,
+      minPerigee: live ? minPerigee : 0,
+      fleet,
       debris: this.debris.length,
       kesslerRisk: Math.min(1, this.debris.length / TUNING.kesslerCap),
       timeScale: this.cfg.timeScale,
@@ -606,7 +821,8 @@ export class GameScene extends Phaser.Scene {
     if (now - this.lastFrameEmit < 250) return;
     this.lastFrameEmit = now;
     const fps = Math.round(this.game.loop.actualFps);
-    getEventBus().emit({ type: "frame", t: 0, fps, entities: this.sats.length });
-    getEventBus().updateSnapshot({ fps, entities: this.sats.length });
+    const entities = this.sats.length + this.debris.length;
+    getEventBus().emit({ type: "frame", t: 0, fps, entities });
+    getEventBus().updateSnapshot({ fps, entities });
   }
 }

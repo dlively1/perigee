@@ -1,10 +1,12 @@
 # Perigee — Agent Handbook
 
-Soft-real-time satellite-startup game. You're a scrappy space-internet company:
-**launch** satellites onto an orbital ring, fight their constant **altitude
-decay** by spending to **boost** them, and earn by holding **sustained
-coverage** over a contracted ground region — without running your **runway**
-(cash) to zero. Score is your company **valuation**.
+Soft-real-time satellite-strategy game. You're a scrappy space-internet
+company: **launch** rockets from your pad into real Newtonian orbits (aim +
+power pick the burnout state), fight atmospheric **drag** on every low perigee
+pass by spending on prograde **boosts**, and earn by holding **sustained
+coverage** over a contracted ground region — without running your cash to zero
+(bankruptcy) or littering the sky into a **Kessler cascade**. Score is your
+company **valuation**.
 
 This document is the first-class spec for any agent (Claude, scripted, or
 human) working the codebase. `AGENTS.md` is a symlink to this file — edit only
@@ -40,31 +42,59 @@ human) working the codebase. `AGENTS.md` is a symlink to this file — edit only
 If the environment can't download Playwright's pinned browser, point the suite
 at a preinstalled Chromium: `PLAYWRIGHT_CHROMIUM_PATH=/path/to/chrome pnpm test`.
 
+## The physics model (read this before touching the sim)
+
+Since the trajectory-launch rewrite, orbits are REAL 2D Newtonian conics:
+
+- Earth sits at the origin; everything integrates under point gravity
+  (`TUNING.mu`) with semi-implicit Euler + substeps (`stepBody`).
+- A linear-density **atmosphere** (surface → `atmosphereCeiling`) drags
+  anything flying low. LEO sits in the thin upper tail, so LEO sats need
+  periodic boosts; orbits above the ceiling coast for free. A low perigee =
+  drag every pass = the death spiral the game is named for.
+- **Launching**: the ascent is a cosmetic animation (game-scale surface
+  gravity is unfightable); the player's aim + power choose the upper stage's
+  **burnout state** at `launch.burnoutRadius`. Power sets insertion speed
+  (→ apogee); aim sets flight-path angle (0 = tangential = healthy perigee).
+  The stage inherits Earth-rotation speed, so prograde launches are cheaper.
+- **Insert** = burnout perigee cleared `insertFloor` (a real orbit, not a lob).
+- **Boost** = prograde Δv. It raises the OPPOSITE side of the orbit — boosting
+  near apogee is how you lift a transfer ellipse's perigee out of the drag.
+  Reaching a high orbit = launch a transfer, coast to apogee, boost. This is
+  deliberate: the skill curve teaches real orbital mechanics with one button.
+- Calibrated envelope (aim 0°): power ≈ 0.25 → circular LEO; ≈ 0.45 → MEO
+  transfer; ≈ 0.62 → GEO transfer; near 1.0 flirts with escape. Unboosted LEO
+  decays in ~70s with ~30s of critical warning.
+
 ## Repository map
 
 ```
 src/
   main.ts               Phaser boot
   agent/
-    config.ts           URL-param config (seed, autoplay, debug, paused, muted, timeScale)
+    config.ts           URL-param config (seed, autoplay, debug, paused, muted, debris, timeScale)
     rng.ts              Seedable mulberry32 PRNG — deterministic runs
     events.ts           window.__PERIGEE bridge (events, snapshot, input, cheat, waitFor*)
   core/                 PURE, unit-tested logic — no Phaser, no state
-    orbit.ts            Angles, altitude decay/boost, spiral radius, coverage test
+    orbit.ts            Gravity integrator, orbital elements, drag, burnout launch
+                        model, trajectory prediction, angles, coverage test
     economy.ts          Revenue accrual, affordability, bankruptcy
   sim/
-    constants.ts        TUNING — every feel knob (geometry, motion, decay, economy)
-    Satellite.ts        Satellite state record + factory
+    constants.ts        TUNING — every feel knob (gravity, atmosphere, launch,
+                        economy, debris) + DRAG model bundle
+    Satellite.ts        Satellite = physics body + lifecycle (ascent/live/critical)
+    Debris.ts           Debris = physics body + source tag
   scenes/
     BootScene.ts        Emit boot → menu
     MenuScene.ts        Title; SPACE/click → game (or autoplay)
-    GameScene.ts        The MVP loop: launch, decay, boost, coverage, bankruptcy
+    GameScene.ts        Sim loop, launch console, collisions, coverage, fail states
   ui/
-    GameHud.ts          Runway / valuation / coverage overlay + bankruptcy panel
+    GameHud.ts          Cash/valuation/coverage/Kessler overlay + toasts + game-over
 tests/
   helpers/gameClient.ts Typed wrappers around the bridge for Playwright
-  smoke.spec.ts         Boot, launch/insert, decay/deorbit, boost, coverage, bankruptcy
-  unit/                 Vitest unit tests for core/ (orbit, economy)
+  smoke.spec.ts         Launch good/botched, drag decay, boost, coverage, debris,
+                        collision, cascade, bankruptcy
+  unit/                 Vitest unit tests for core/ (orbit physics, economy)
 ```
 
 ## The agent loop (THIS IS THE LOAD-BEARING PART)
@@ -75,14 +105,15 @@ instead of scraping pixels.
 
 ### URL params (all optional)
 
-| Param       | Type           | Default    | Notes                                       |
-| ----------- | -------------- | ---------- | ------------------------------------------- |
-| `seed`      | int or `0xHEX` | `0xC0FFEE` | Feeds the deterministic RNG (region angle). |
-| `autoplay`  | `1` / `true`   | off        | Skip the menu, start the game immediately.  |
-| `debug`     | `1` / `true`   | off        | Reserved for a future debug HUD.            |
-| `paused`    | `1` / `true`   | off        | Boot paused (handy for screenshots).        |
-| `muted`     | `1` / `true`   | off        | Reserved (no audio yet).                    |
-| `timeScale` | float 1–8      | `1`        | Run the sim N× faster for slow e2e waits.   |
+| Param       | Type           | Default    | Notes                                      |
+| ----------- | -------------- | ---------- | ------------------------------------------ |
+| `seed`      | int or `0xHEX` | `0xC0FFEE` | Feeds the deterministic RNG.               |
+| `autoplay`  | `1` / `true`   | off        | Skip the menu, start the game immediately. |
+| `debug`     | `1` / `true`   | off        | Reserved for a future debug HUD.           |
+| `paused`    | `1` / `true`   | off        | Boot paused (handy for screenshots).       |
+| `muted`     | `1` / `true`   | off        | Reserved (no audio yet).                   |
+| `debris`    | `0` / `false`  | on         | Disable ambient junk (isolates lifecycle). |
+| `timeScale` | float 1–8      | `1`        | Run the sim N× faster for slow e2e waits.  |
 
 Example: `http://localhost:5173/?seed=42&autoplay=1&timeScale=4`
 
@@ -93,13 +124,22 @@ window.__PERIGEE = {
   version: 1,
   events: GameEvent[],          // ring buffer, last ~2000 entries
   snapshot: {
-    ready, scene, seed, paused, gameOver,
-    cash, valuation, covered, satellites, minAltitude, fps, entities, timeScale
+    ready, scene, seed, paused, gameOver, gameOverReason,
+    cash, valuation, covered, satellites, minPerigee,
+    fleet: [{ id, live, perigee, apogee }],
+    debris, kesslerRisk, fps, entities, timeScale
   },
   input: {                      // headless input (works even while paused)
-    launch(angle), boost(id?), pause()
+    launch(fpaDeg, power),      // fire from the site: aim° from tangential, 0..1 power
+    boost(id?),                 // prograde Δv (selected sat, else lowest perigee)
+    deorbit(id?),               // clean removal, no debris
+    pause()
   },
-  cheat: { addCash(amount) },   // test shortcut — jump the wallet to a state
+  cheat: {                      // test shortcuts — jump to a state
+    addCash(amount),
+    spawnSat(angle, radius, vFactor?),    // live sat on orbit (1 = circular)
+    spawnDebris(angle?, radius?, vFactor?)
+  },
   waitFor(predicate, timeoutMs?),
   waitForEvent(type, timeoutMs?),
 };
@@ -108,8 +148,11 @@ window.__PERIGEE = {
 ### Event types
 
 `boot`, `scene`, `run-start`, `launch`, `insert`, `boost`, `decay-critical`,
-`deorbit`, `coverage-start`, `coverage-gap`, `revenue`, `bankruptcy`, `frame`.
-All carry `t` (ms since boot, monotonic). Exact shapes in `src/agent/events.ts`.
+`deorbit` (reason: decay | crash | escaped | collision | commanded),
+`debris-spawn`, `debris-decay`, `collision`, `kessler-cascade`,
+`action-blocked`, `coverage-start`, `coverage-gap`, `revenue`, `bankruptcy`,
+`game-over` (reason: bankruptcy | kessler), `frame`. All carry `t` (ms since
+boot, monotonic). Exact shapes in `src/agent/events.ts`.
 
 ## Conventions
 
@@ -136,12 +179,17 @@ All carry `t` (ms since boot, monotonic). Exact shapes in `src/agent/events.ts`.
 5. If a feature added observable state, ensure there's an event + a test that
    asserts it fires.
 
-## Roadmap beyond the MVP (deferred — do not add without scoping)
+## Shipped layers & roadmap
 
-The MVP is intentionally one ring with launch / decay / boost / coverage /
-bankruptcy. Deferred layers, in rough order: **debris + Kessler cascade**,
-**eclipse / battery**, multiple rings (MEO/GEO), a contract/economy meta with
-**funding rounds** and a tech tree, cheap-rocket **launch failures**, and
-**de-orbit** tugs. See `perigee-design-brief.md` in the workspace for the full
-design intent and the two-fail-state tension (bankruptcy vs. Kessler) that the
+Shipped, in order: **MVP loop** (launch/decay/boost/coverage/bankruptcy),
+**debris + Kessler cascade** (ambient junk, collisions → fragments, cascade
+cap, commanded de-orbit), **feel pass** (strategy pacing, HUD legibility,
+action-blocked feedback), **trajectory launch** (real Newtonian orbits, the
+launch console, atmosphere drag, boost-as-Δv).
+
+Deferred (do not add without scoping): orbit **bands + launch sites +
+valuation-gated progression** (stage 3, in flight), debris–debris collisions
+(cascade self-sustain), eclipse/battery, contracts/funding rounds, launch
+failures, de-orbit tugs. See `perigee-design-brief.md` in the workspace for
+the design intent and the two-fail-state tension (bankruptcy vs. Kessler) the
 whole game is built around.

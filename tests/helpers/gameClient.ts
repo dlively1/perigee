@@ -45,8 +45,10 @@ export async function waitForScene(page: Page, name: string, timeoutMs = 8_000):
   });
 }
 
-export async function launch(page: Page, angle: number): Promise<void> {
-  await page.evaluate((a) => window.__PERIGEE!.input.launch(a), angle);
+// Fire from the active launch site: fpaDeg = flight-path angle in degrees
+// (0 = tangential/ideal), power = 0..1 speed dial.
+export async function launch(page: Page, fpaDeg: number, power: number): Promise<void> {
+  await page.evaluate(([f, p]) => window.__PERIGEE!.input.launch(f, p), [fpaDeg, power] as const);
 }
 
 export async function boost(page: Page, id?: number): Promise<void> {
@@ -61,10 +63,31 @@ export async function addCash(page: Page, amount: number): Promise<void> {
   await page.evaluate((a) => window.__PERIGEE!.cheat.addCash(a), amount);
 }
 
-export async function spawnDebris(page: Page, angle?: number, alt?: number): Promise<void> {
-  await page.evaluate(([a, al]) => window.__PERIGEE!.cheat.spawnDebris(a, al), [
+// Place a live satellite directly on orbit (test shortcut): circular speed at
+// `radius` scaled by `vFactor` (1 = circular, negative = retrograde).
+export async function spawnSat(
+  page: Page,
+  angle: number,
+  radius: number,
+  vFactor = 1,
+): Promise<void> {
+  await page.evaluate(([a, r, v]) => window.__PERIGEE!.cheat.spawnSat(a, r, v), [
     angle,
-    alt,
+    radius,
+    vFactor,
+  ] as const);
+}
+
+export async function spawnDebris(
+  page: Page,
+  angle?: number,
+  radius?: number,
+  vFactor?: number,
+): Promise<void> {
+  await page.evaluate(([a, r, v]) => window.__PERIGEE!.cheat.spawnDebris(a, r, v), [
+    angle,
+    radius,
+    vFactor,
   ] as const);
 }
 
