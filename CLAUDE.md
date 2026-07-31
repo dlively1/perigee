@@ -52,6 +52,14 @@ Since the trajectory-launch rewrite, orbits are REAL 2D Newtonian conics:
   anything flying low. LEO sits in the thin upper tail, so LEO sats need
   periodic boosts; orbits above the ceiling coast for free. A low perigee =
   drag every pass = the death spiral the game is named for.
+- **Debris uses its own, much harsher drag model** (`DEBRIS_DRAG`:
+  `debrisCeiling` 320, `debrisDragK`). Physically that's a tumbling fragment's
+  high area-to-mass ratio versus an intact satellite holding attitude. In
+  gameplay terms it's what stops the sky silting up: on the satellite ceiling
+  (140), any debris spawned above it was _immortal_ and every run eventually
+  ended in a cascade. Nothing below `debrisCeiling` orbits forever now —
+  lifetimes run ~45s in LEO to ~90s past GEO. If debris ever feels too thick
+  or too thin again, this pair and the ambient cadence are the levers.
 - **Launching**: the ascent is a cosmetic animation (game-scale surface
   gravity is unfightable); the player's aim + power choose the upper stage's
   **burnout state** at `launch.burnoutRadius`. Power sets insertion speed

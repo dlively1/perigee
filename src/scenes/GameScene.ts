@@ -3,7 +3,7 @@ import { Rng } from "../agent/rng";
 import { readAgentConfig, type AgentConfig } from "../agent/config";
 import { getEventBus } from "../agent/events";
 import { GameHud } from "../ui/GameHud";
-import { TUNING, DRAG } from "../sim/constants";
+import { TUNING, DRAG, DEBRIS_DRAG } from "../sim/constants";
 import { createSatellite, type Satellite } from "../sim/Satellite";
 import { createDebris, type Debris, type DebrisSource } from "../sim/Debris";
 import {
@@ -608,7 +608,7 @@ export class GameScene extends Phaser.Scene {
     const deadDebris: number[] = [];
     for (const d of this.debris) {
       if (d.settleRemaining > 0) d.settleRemaining = Math.max(0, d.settleRemaining - dt);
-      stepBody(TUNING.mu, d, dt, DRAG);
+      stepBody(TUNING.mu, d, dt, DEBRIS_DRAG);
       const r = Math.hypot(d.x, d.y);
       if (r <= TUNING.earthRadius + 2 || r > TUNING.escapeRadius) {
         deadDebris.push(d.id);

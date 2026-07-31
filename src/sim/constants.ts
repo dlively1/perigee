@@ -22,6 +22,17 @@ export const TUNING = {
   atmosphereCeiling: 140,
   dragK: 0.012,
 
+  // Debris feels a much stronger, much higher-reaching drag than satellites.
+  // That's physically honest — a tumbling fragment has a far higher
+  // area-to-mass ratio than an intact satellite holding attitude, so real
+  // debris re-enters far faster from the same altitude — and it's what keeps
+  // the sky from silting up. With the satellite ceiling (140) debris spawned
+  // above it was literally immortal and accumulated until every run ended in
+  // a cascade. Nothing below `debrisCeiling` orbits forever now; lifetimes run
+  // ~45s in LEO to ~90s out past GEO.
+  debrisCeiling: 320,
+  debrisDragK: 0.01,
+
   // Launch: the ascent is animated; aim + power pick the upper stage's BURNOUT
   // STATE at the edge of the atmosphere. Power sets the insertion speed
   // (→ apogee); aim sets the flight-path angle (0 = tangential = healthy
@@ -97,9 +108,17 @@ export const TUNING = {
 
 export type Tuning = typeof TUNING;
 
-// The drag model in the shape src/core/orbit.ts expects.
+// The drag models in the shape src/core/orbit.ts expects. Satellites hold
+// attitude and only feel the thin upper atmosphere; debris tumbles and bleeds
+// energy much faster, so it self-cleans instead of piling up forever.
 export const DRAG = {
   earthRadius: TUNING.earthRadius,
   ceiling: TUNING.atmosphereCeiling,
   k: TUNING.dragK,
+} as const;
+
+export const DEBRIS_DRAG = {
+  earthRadius: TUNING.earthRadius,
+  ceiling: TUNING.debrisCeiling,
+  k: TUNING.debrisDragK,
 } as const;
