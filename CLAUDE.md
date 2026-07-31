@@ -225,7 +225,9 @@ valuation-unlocked launch pads, altitude/pay trade), **playtest pass**
 self-sustain, satellite art with footprint arcs).
 
 Deferred (do not add without scoping): eclipse/battery, explicit contracts +
-funding rounds, tech tree, launch failures, de-orbit tugs. See
-`perigee-design-brief.md` in the workspace for
-the design intent and the two-fail-state tension (bankruptcy vs. Kessler) the
-whole game is built around.
+funding rounds, tech tree, launch failures, de-orbit tugs.
+
+[`docs/design-brief.md`](./docs/design-brief.md) is the original design brief —
+a historical document, but the place to understand the two-fail-state tension
+(bankruptcy vs. Kessler) the whole game is built around. This handbook wins
+wherever the two disagree.

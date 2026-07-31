@@ -1,6 +1,23 @@
+# Dependencies & build output
 node_modules
 dist
+.vite
+
+# Test artifacts
 test-results
 playwright-report
+coverage
+
+# Secrets — never commit these
+.env
+.env.*
+
+# Scratch files (dev/debug scripts written into the repo root)
+*.tmp.*
 *.log
+
+# Editor / tooling local state
+.vscode/
+.idea/
+.claude/
 .DS_Store
