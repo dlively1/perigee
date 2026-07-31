@@ -190,9 +190,16 @@ close over Node-side values; pass them via the `arg` parameter.
 
 ## Conventions
 
-- **Determinism first.** Any randomness goes through `Rng` seeded from
-  `AgentConfig.seed`. Never call `Math.random()` in gameplay code — ESLint
-  enforces this in `src/`.
+- **Determinism is a dev tool, not a design pillar.** Randomness goes through
+  `Rng` seeded from `AgentConfig.seed`, and ESLint bans `Math.random()` in
+  `src/`. Worth knowing what this does and doesn't buy: the test suite gets
+  its repeatability from the **cheat API** (`spawnSat`/`spawnDebris` at exact
+  positions), not from the seed — only one spec passes a seed at all. The real
+  payoff is replaying a weird run from a play session, and keeping the door
+  open to seeded daily-challenge runs later. It costs one lint rule, so it
+  stays; just don't treat "deterministic" as something the game is _about_.
+  Only four things consume the RNG: contract region start angle, ambient
+  debris timing/placement, fragment scatter, and (cosmetic) landmass shapes.
 - **Rules are pure and tested.** New sim math goes in `src/core/` as a pure
   function with a Vitest test — not buried in `GameScene`. Unit tests run in
   milliseconds; the e2e suite takes longer.

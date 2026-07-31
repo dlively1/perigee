@@ -11,9 +11,8 @@ alive, **de-orbit** dying ones cleanly before they become junk. Let cash hit zer
 and you're bankrupt; let debris pile up and a **Kessler cascade** graveyards
 the sky. Your score is your company's **valuation**.
 
-Built with **Phaser 3** + **TypeScript**, 100% procedural art (no image or
-audio files anywhere in the repo), and a seeded RNG so a given seed plays out
-the same on any machine.
+Built with **Phaser 3** + **TypeScript**, and 100% procedural art — no image or
+audio files anywhere in the repo.
 
 ## Launching (the fun part)
 
