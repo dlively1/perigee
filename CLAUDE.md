@@ -74,6 +74,16 @@ Since the trajectory-launch rewrite, orbits are REAL 2D Newtonian conics:
   belongs in the launch, and boosting needs to read as simply "up". A boost
   also cannot cross a band ceiling (`boostBandMargin`), so it can't substitute
   for unlocking a better pad; that refusal emits `action-blocked/at-ceiling`.
+- **Service life (fuel).** Every satellite launches with `fuelSeconds` of
+  station-keeping (set by the pad that built it) and burns it 1:1 while live.
+  A boost costs `boostFuel` up front on top of cash. At zero the sat goes
+  **dark**: still in orbit, still a collision hazard, but earning nothing and
+  unboostable until de-orbited. Two things this fixes: (1) `atmosphereCeiling`
+  is 140 while LEO runs to 180, so a sat boosted to ~170 sat above the drag
+  zone on the FULL LEO rate and was free money forever — nothing bounded it;
+  (2) there was no reason to ever de-orbit a healthy satellite, so the `D` key
+  and the whole clean-removal counter-play were nearly dead. Fuel puts the
+  fleet on a clock and gives `D` a job.
 - Calibrated envelope (aim 0°): power ≈ 0.25 → circular LEO; ≈ 0.45 → MEO
   transfer; ≈ 0.62 → GEO transfer; near 1.0 flirts with escape. Unboosted LEO
   decays in ~70s with ~30s of critical warning.
@@ -88,10 +98,12 @@ Three data registries drive the whole meta layer — extend these, not the scene
   `rateMult`: high-orbit internet has latency, so contracts pay less. That's
   the core trade — LEO pays best and dies fastest.
 - **`src/sim/sites.ts`** — launch pads, fixed in the Earth frame (they rotate
-  with the planet). Each caps the console's power dial via `maxPower`, and
-  auto-unlocks when **valuation** reaches `unlockValuation`. That's the
-  economy split made concrete: **cash operates, valuation unlocks.** The
-  starter pad tops out around LEO; the best pad reaches GEO transfers.
+  with the planet), auto-unlocked when **valuation** reaches
+  `unlockValuation`. That's the economy split made concrete: **cash operates,
+  valuation unlocks.** A pad upgrade buys two things: `maxPower` (reach — the
+  starter tops out around LEO, the best throws GEO transfers) and
+  `fuelSeconds` (better satellites — a bigger pad integrates a bigger
+  spacecraft, so its birds work longer before going dark).
 - **`src/sim/regions.ts`** — the contract markets you're paid to serve, also
   fixed to the planet. Each pays `payRate` $/s while covered, and signs on at
   its own `unlockValuation`.
@@ -131,6 +143,7 @@ src/
     constants.ts        TUNING — every feel knob (gravity, atmosphere, launch,
                         economy, debris) + DRAG model bundle
     Satellite.ts        Satellite = physics body + lifecycle (ascent/live/critical)
+                        + service life (fuel/fuelMax/expired)
     Debris.ts           Debris = physics body + source tag
     bands.ts            LEO/MEO/GEO registry — classification, pay rate, footprint
     sites.ts            Launch-pad registry — angle, power cap, valuation unlock
@@ -177,9 +190,9 @@ window.__PERIGEE = {
   events: GameEvent[],          // ring buffer, last ~2000 entries
   snapshot: {
     ready, scene, seed, paused, gameOver, gameOverReason,
-    cash, valuation, covered, income, satellites, minPerigee,
+    cash, valuation, covered, income, satellites, expiredSats, minPerigee,
     regions: [{ id, unlocked, covered }],   // covered = ANY of them; income = $/s
-    fleet: [{ id, live, perigee, apogee }],
+    fleet: [{ id, live, perigee, apogee, fuel, fuelMax, expired }],
     activeSite, unlockedSites: string[],
     debris, kesslerRisk, fps, entities, timeScale
   },
@@ -193,7 +206,9 @@ window.__PERIGEE = {
   cheat: {                      // test shortcuts — jump to a state
     addCash(amount),
     addValuation(amount),                 // drives site + region unlocks
-    spawnSat(angle, radius, vFactor?),    // live sat on orbit (1 = circular)
+    spawnSat(angle, radius, vFactor?, fuelSeconds?),  // live sat on orbit
+                                          // (vFactor 1 = circular; small
+                                          // fuelSeconds to test going dark)
     spawnDebris(angle?, radius?, vFactor?)
   },
   waitFor(predicate, timeoutMs?),
@@ -204,10 +219,12 @@ window.__PERIGEE = {
 ### Event types
 
 `boot`, `scene`, `run-start`, `launch`, `insert`, `boost`, `decay-critical`,
+`sat-expired` (ran out of station-keeping fuel — dark, not gone),
 `deorbit` (reason: decay | crash | escaped | collision | commanded),
 `debris-spawn`, `debris-decay`, `collision`, `debris-collision`,
 `kessler-cascade`,
-`action-blocked` (action: launch | boost | deorbit | select-site),
+`action-blocked` (action: launch | boost | deorbit | select-site;
+reason: cash | max-sats | no-target | locked | unknown | at-ceiling | fuel),
 `site-unlocked`, `region-unlocked`,
 `coverage-start` / `coverage-gap` (both carry `regionId` — they fire per
 region, not once globally), `revenue`, `bankruptcy`,
@@ -263,7 +280,13 @@ valuation-unlocked launch pads, altitude/pay trade), **playtest pass**
 (boost simplified to an orbit-raise, debris–debris collisions so cascades
 self-sustain, satellite art with footprint arcs), **multiple contract regions**
 (markets that unlock on valuation and pay additively; the twin-pair spacing
-that finally makes climbing worth the lower rate).
+that finally makes climbing worth the lower rate), **satellite service life**
+(fuel per bird set by the building pad, boosts spend it, empty = dark and
+inert — fleet turnover, and a real job for the de-orbit key).
+
+Test-harness note for ring setups: spawning N satellites under a running clock
+staggers them by a round trip each, which leaves a seam in the ring and makes
+coverage flicker. Boot `paused: true`, spawn, then `togglePause()`.
 
 Deferred (do not add without scoping): eclipse/battery, explicit contracts +
 funding rounds, tech tree, launch failures, de-orbit tugs.

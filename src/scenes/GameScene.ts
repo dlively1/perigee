@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 import { Rng } from "../agent/rng";
 import { readAgentConfig, type AgentConfig } from "../agent/config";
-import { getEventBus } from "../agent/events";
+import { getEventBus, type GameEvent, type GameSnapshot } from "../agent/events";
 import { GameHud } from "../ui/GameHud";
 import { TUNING, DRAG, DEBRIS_DRAG } from "../sim/constants";
 import { createSatellite, type Satellite } from "../sim/Satellite";
@@ -52,12 +52,15 @@ const COL = {
   rocket: 0xe6ecf5,
   select: 0xffffff,
   debris: 0xd85a30,
+  dead: 0x6b7a90, // a satellite that ran out of fuel — dark, inert, in the way
   flash: 0xffd27a,
   pad: 0xe6ecf5,
   guide: 0x2b3a56,
 } as const;
 
 const FONT = "ui-monospace, monospace";
+
+type BlockedEvent = Extract<GameEvent, { type: "action-blocked" }>;
 
 export class GameScene extends Phaser.Scene {
   private cfg!: AgentConfig;
@@ -173,7 +176,8 @@ export class GameScene extends Phaser.Scene {
         this.wallet.valuation += amount;
         this.checkUnlocks();
       },
-      spawnSat: (angle, radius, vFactor = 1) => this.cheatSpawnSat(angle, radius, vFactor),
+      spawnSat: (angle, radius, vFactor = 1, fuelSeconds = SITES[0].fuelSeconds) =>
+        this.cheatSpawnSat(angle, radius, vFactor, fuelSeconds),
       spawnDebris: (angle, radius, vFactor = 1) =>
         this.spawnDebrisBody(
           angle ?? this.rng.range(0, TWO_PI),
@@ -355,7 +359,16 @@ export class GameScene extends Phaser.Scene {
       TUNING.earthOmega,
     );
     const pad = pointOnCircle(0, 0, TUNING.earthRadius, siteAngle);
-    const sat = createSatellite(this.nextId++, burnout, pad.x, pad.y, L.ascentSeconds);
+    // The pad that built it sets its service life — that's the other half of a
+    // site upgrade, alongside reach.
+    const sat = createSatellite(
+      this.nextId++,
+      burnout,
+      pad.x,
+      pad.y,
+      L.ascentSeconds,
+      site.fuelSeconds,
+    );
     this.sats.push(sat);
     getEventBus().emit({
       type: "launch",
@@ -379,6 +392,20 @@ export class GameScene extends Phaser.Scene {
       this.blocked("boost", "cash", `boost costs $${TUNING.boostCost} — not enough cash`);
       return;
     }
+    // A boost burns service life, not just cash. A dark sat has none left, and
+    // one nearly dry can't afford the burn — replace it instead.
+    if (target.expired) {
+      this.blocked("boost", "fuel", `sat #${target.id} is out of fuel — de-orbit it (D)`);
+      return;
+    }
+    if (target.fuel < TUNING.boostFuel) {
+      this.blocked(
+        "boost",
+        "fuel",
+        `sat #${target.id} has ${Math.ceil(target.fuel)}s left — a boost costs ${TUNING.boostFuel}s`,
+      );
+      return;
+    }
     // Raise the orbit one step, but never past the top of the current band —
     // climbing to a higher band is what better launch pads are for.
     const from = Math.hypot(target.x, target.y);
@@ -394,6 +421,7 @@ export class GameScene extends Phaser.Scene {
     }
     const to = Math.min(from + TUNING.boostRise, ceiling);
     this.wallet.cash = spend(this.wallet.cash, TUNING.boostCost);
+    target.fuel = Math.max(0, target.fuel - TUNING.boostFuel);
     target.raiseFrom = from;
     target.raiseTo = to;
     target.raiseRemaining = TUNING.boostSeconds;
@@ -404,8 +432,12 @@ export class GameScene extends Phaser.Scene {
       fromRadius: from,
       toRadius: to,
       cost: TUNING.boostCost,
+      fuel: target.fuel,
     });
-    this.hud.toast(`sat #${target.id} raising to ${Math.round(to)} (${bandFor(to).label})`);
+    this.hud.toast(
+      `sat #${target.id} raising to ${Math.round(to)} (${bandFor(to).label}) — ` +
+        `${Math.ceil(target.fuel)}s life left`,
+    );
     this.pushSnapshot();
   }
 
@@ -413,7 +445,7 @@ export class GameScene extends Phaser.Scene {
   // gets hit — the counter-play to Kessler, since it leaves no debris.
   private doDeorbit(id?: number): void {
     if (this.gameOver) return;
-    const target = this.pickTarget(id);
+    const target = this.pickTarget(id, "dark");
     if (!target) {
       this.blocked("deorbit", "no-target", "no satellite to de-orbit");
       return;
@@ -429,16 +461,26 @@ export class GameScene extends Phaser.Scene {
     this.pushSnapshot();
   }
 
-  // id → that sat; else selected; else the lowest-perigee live sat.
-  private pickTarget(id?: number): Satellite | undefined {
+  // id → that sat; else the selected one; else a sensible default for the
+  // action. `prefer` shapes only that last fallback: boosting wants the most
+  // urgent bird that can still take a burn, de-orbiting wants the dead weight.
+  private pickTarget(id?: number, prefer: "urgent" | "dark" = "urgent"): Satellite | undefined {
     if (id != null) return this.sats.find((s) => s.id === id && s.live);
     if (this.selectedId != null) {
       const sel = this.sats.find((s) => s.id === this.selectedId && s.live);
       if (sel) return sel;
     }
+    // Pressing D with nothing selected should clear the junk you just watched
+    // go dark, not the healthy sat that happens to fly lowest.
+    if (prefer === "dark") {
+      const dark = this.sats.find((s) => s.live && s.expired);
+      if (dark) return dark;
+    }
     let best: Satellite | undefined;
     for (const s of this.sats) {
       if (!s.live) continue;
+      // A dark sat can't be boosted, so it's never the urgent-fallback pick.
+      if (prefer === "urgent" && s.expired) continue;
       if (!best || s.perigee < best.perigee) best = s;
     }
     return best;
@@ -450,9 +492,10 @@ export class GameScene extends Phaser.Scene {
     getEventBus().updateSnapshot({ paused: this.paused });
   }
 
+  // Derived from the event so the two can't drift apart as reasons are added.
   private blocked(
-    action: "launch" | "boost" | "deorbit" | "select-site",
-    reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown" | "at-ceiling",
+    action: BlockedEvent["action"],
+    reason: BlockedEvent["reason"],
     message: string,
   ): void {
     this.hud.toast(message);
@@ -477,10 +520,10 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private cheatSpawnSat(angle: number, radius: number, vFactor: number): void {
+  private cheatSpawnSat(angle: number, radius: number, vFactor: number, fuelSeconds: number): void {
     if (this.sats.length >= TUNING.maxSatellites) return;
     const state = this.onOrbitState(angle, radius, vFactor);
-    const sat = createSatellite(this.nextId++, state, state.x, state.y, 0);
+    const sat = createSatellite(this.nextId++, state, state.x, state.y, 0, fuelSeconds);
     const el = orbitalElements(TUNING.mu, sat);
     sat.perigee = el.perigee;
     sat.apogee = el.apogee;
@@ -629,6 +672,17 @@ export class GameScene extends Phaser.Scene {
         if (rel.perigee >= TUNING.criticalPerigee) s.critical = false;
         continue;
       }
+      // Station-keeping burns service life every second a sat is working.
+      // Running dry doesn't drop it out of the sky — it goes dark: still in
+      // orbit, still a hazard, but earning nothing until it's de-orbited.
+      if (s.live && !s.expired) {
+        s.fuel = Math.max(0, s.fuel - TUNING.fuelDrainPerSec * dt);
+        if (s.fuel <= 0) {
+          s.expired = true;
+          bus.emit({ type: "sat-expired", t: 0, id: s.id });
+          this.hud.toast(`sat #${s.id} is out of fuel — dark, and now just debris (D to clear)`);
+        }
+      }
       stepBody(TUNING.mu, s, dt, DRAG);
       const r = Math.hypot(s.x, s.y);
       const el = orbitalElements(TUNING.mu, s);
@@ -758,7 +812,8 @@ export class GameScene extends Phaser.Scene {
       let rawCovered = false;
       let rate = 0;
       for (const s of this.sats) {
-        if (!s.live || s.ascentRemaining > 0) continue;
+        // A dark sat is still up there, but it isn't serving anyone.
+        if (!s.live || s.expired || s.ascentRemaining > 0) continue;
         const r = Math.hypot(s.x, s.y);
         const hw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
         if (!isAngleCovered([Math.atan2(s.y, s.x)], ra, hw)) continue;
@@ -889,21 +944,24 @@ export class GameScene extends Phaser.Scene {
         continue;
       }
       const sp = this.toScreen(s.x, s.y);
-      const color = !s.live
-        ? COL.danger
-        : s.perigee >= TUNING.criticalPerigee + 25
-          ? COL.healthy
-          : s.perigee >= TUNING.criticalPerigee
-            ? COL.warn
-            : COL.danger;
+      const color = s.expired
+        ? COL.dead
+        : !s.live
+          ? COL.danger
+          : s.perigee >= TUNING.criticalPerigee + 25
+            ? COL.healthy
+            : s.perigee >= TUNING.criticalPerigee
+              ? COL.warn
+              : COL.danger;
 
       const r = Math.hypot(s.x, s.y);
       const angle = Math.atan2(s.y, s.x);
 
       // Coverage footprint: the slice of ground this sat is serving right now.
-      // Widens with altitude (see bands), and brightens when it's over the
-      // contract region — the main read for "is this bird earning?".
-      if (s.live) {
+      // Widens with altitude (see bands), and brightens when it's over a
+      // contract region — the main read for "is this bird earning?". A dark
+      // sat draws none: nothing it flies over counts any more.
+      if (s.live && !s.expired) {
         const fw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
         const serving = this.regions.some(
           (rs) => rs.unlocked && Math.abs(angleDelta(angle, this.regionScreenAngle(rs.def))) <= fw,
@@ -934,13 +992,35 @@ export class GameScene extends Phaser.Scene {
 
       // The satellite itself: a bus with two solar panels, wings laid along
       // the orbit track so it reads as a spacecraft rather than a pixel.
+      // A dark sat keeps the silhouette but hollows out — same shape, no
+      // lights, so "that one is dead weight" reads at a glance.
       const wx = -Math.sin(angle);
       const wy = Math.cos(angle);
-      g.lineStyle(3, color, 0.85);
+      g.lineStyle(s.expired ? 2 : 3, color, s.expired ? 0.55 : 0.85);
       g.lineBetween(sp.x + wx * 4, sp.y + wy * 4, sp.x + wx * 11, sp.y + wy * 11);
       g.lineBetween(sp.x - wx * 4, sp.y - wy * 4, sp.x - wx * 11, sp.y - wy * 11);
-      g.fillStyle(color, 1);
-      g.fillRect(sp.x - 4, sp.y - 4, 8, 8);
+      if (s.expired) {
+        g.lineStyle(1.5, color, 0.8);
+        g.strokeRect(sp.x - 4, sp.y - 4, 8, 8);
+      } else {
+        g.fillStyle(color, 1);
+        g.fillRect(sp.x - 4, sp.y - 4, 8, 8);
+      }
+
+      // Service life: a short bar under the bus, so the whole fleet's age is
+      // one glance. Empty bar = dark satellite.
+      if (s.live) {
+        const half = 7;
+        const y = sp.y + 11;
+        g.lineStyle(2, COL.guide, 0.9);
+        g.lineBetween(sp.x - half, y, sp.x + half, y);
+        const frac = s.fuelMax > 0 ? Math.max(0, s.fuel / s.fuelMax) : 0;
+        if (frac > 0) {
+          g.lineStyle(2, s.fuel <= TUNING.fuelWarnSec ? COL.warn : COL.healthy, 0.95);
+          g.lineBetween(sp.x - half, y, sp.x - half + 2 * half * frac, y);
+        }
+      }
+
       // A boosting sat wears a bright ring while it climbs.
       if (s.raiseRemaining > 0) {
         g.lineStyle(2, COL.flash, 0.8);
@@ -978,12 +1058,14 @@ export class GameScene extends Phaser.Scene {
       regionsSigned: this.regions.filter((r) => r.unlocked).length,
       income: this.income,
       sats: this.sats.length,
+      darkSats: this.sats.filter((s) => s.live && s.expired).length,
       satCap: TUNING.maxSatellites,
       debris: this.debris.length,
       kesslerRisk: Math.min(1, this.debris.length / TUNING.kesslerCap),
       paused: this.paused,
       consoleOpen: this.consoleOpen,
       siteName: this.activeSite().name,
+      siteFuelSeconds: this.activeSite().fuelSeconds,
       nextUnlock: this.nextUnlock(),
     });
 
@@ -1064,12 +1146,25 @@ export class GameScene extends Phaser.Scene {
 
   private pushSnapshot(): void {
     let minPerigee = Infinity;
-    let live = 0;
-    const fleet: { id: number; live: boolean; perigee: number; apogee: number }[] = [];
+    let earning = 0;
+    let dark = 0;
+    const fleet: GameSnapshot["fleet"] = [];
     for (const s of this.sats) {
-      fleet.push({ id: s.id, live: s.live, perigee: s.perigee, apogee: s.apogee });
+      fleet.push({
+        id: s.id,
+        live: s.live,
+        perigee: s.perigee,
+        apogee: s.apogee,
+        fuel: s.fuel,
+        fuelMax: s.fuelMax,
+        expired: s.expired,
+      });
       if (!s.live) continue;
-      live++;
+      if (s.expired) {
+        dark++;
+        continue;
+      }
+      earning++;
       if (s.perigee < minPerigee) minPerigee = s.perigee;
     }
     getEventBus().updateSnapshot({
@@ -1087,8 +1182,9 @@ export class GameScene extends Phaser.Scene {
         covered: r.covered,
       })),
       income: this.income,
-      satellites: live,
-      minPerigee: live ? minPerigee : 0,
+      satellites: earning,
+      expiredSats: dark,
+      minPerigee: earning ? minPerigee : 0,
       fleet,
       activeSite: this.activeSiteId,
       unlockedSites: SITES.filter((s) => this.unlockedIds.has(s.id)).map((s) => s.id),

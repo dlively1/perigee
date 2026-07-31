@@ -14,10 +14,22 @@ export type GameEvent =
   // live and earning. Carries the achieved orbit.
   | { type: "insert"; t: number; id: number; perigee: number; apogee: number }
   // An orbit-raise was ordered: the sat glides from `fromRadius` onto a
-  // circular orbit at `toRadius`.
-  | { type: "boost"; t: number; id: number; fromRadius: number; toRadius: number; cost: number }
+  // circular orbit at `toRadius`. Costs cash AND service life — `fuel` is the
+  // seconds of station-keeping left afterwards.
+  | {
+      type: "boost";
+      t: number;
+      id: number;
+      fromRadius: number;
+      toRadius: number;
+      cost: number;
+      fuel: number;
+    }
   // A live sat's perigee dipped below the critical radius (fires once per dip).
   | { type: "decay-critical"; t: number; id: number; perigee: number }
+  // A satellite ran out of station-keeping fuel and went dark. It stays in
+  // orbit as a hazard, earning nothing, until de-orbited or struck.
+  | { type: "sat-expired"; t: number; id: number }
   // A satellite is gone. `decay` = a live sat dragged down and burned up;
   // `crash` = a botched launch that never made orbit; `escaped` = flung past
   // the escape radius; `collision` = struck by debris (spawns fragments);
@@ -48,7 +60,15 @@ export type GameEvent =
       type: "action-blocked";
       t: number;
       action: "launch" | "boost" | "deorbit" | "select-site";
-      reason: "cash" | "max-sats" | "no-target" | "locked" | "unknown" | "at-ceiling";
+      reason:
+        | "cash"
+        | "max-sats"
+        | "no-target"
+        | "locked"
+        | "unknown"
+        | "at-ceiling"
+        // Not enough station-keeping fuel left to boost (or already dark).
+        | "fuel";
     }
   // Valuation crossed a launch site's threshold — it's now available.
   | { type: "site-unlocked"; t: number; siteId: string }
@@ -84,13 +104,26 @@ export interface GameSnapshot {
   // Current gross revenue in $/s — the sum of every covered region's pay rate
   // scaled by the band of the best-paying satellite serving it.
   income: number;
-  // Count of live satellites (excludes rockets still climbing / botched lobs).
+  // Count of EARNING satellites — excludes rockets still climbing, botched
+  // lobs, and sats that went dark when their fuel ran out.
   satellites: number;
+  // Live-but-dark satellites: out of fuel, earning nothing, still a hazard.
+  expiredSats: number;
   // Lowest perigee (px from Earth's center) across live sats, 0 when none —
   // the most-urgent orbit. Compare against criticalPerigee.
   minPerigee: number;
-  // Per-sat orbit summary for agents: id, live flag, cached perigee/apogee.
-  fleet: { id: number; live: boolean; perigee: number; apogee: number }[];
+  // Per-sat summary for agents: orbit, plus remaining service life.
+  fleet: {
+    id: number;
+    live: boolean;
+    perigee: number;
+    apogee: number;
+    // Seconds of station-keeping left, what it launched with, and whether it
+    // has already gone dark.
+    fuel: number;
+    fuelMax: number;
+    expired: boolean;
+  }[];
   // Active launch site + which sites valuation has unlocked.
   activeSite: string;
   unlockedSites: string[];
@@ -129,8 +162,9 @@ export interface GameBridge {
     // Raise valuation directly (drives site unlocks in tests).
     addValuation: (amount: number) => void;
     // Place a live satellite directly on orbit: circular speed at `radius`
-    // scaled by `vFactor` (1 = circular, negative = retrograde).
-    spawnSat: (angle: number, radius: number, vFactor?: number) => void;
+    // scaled by `vFactor` (1 = circular, negative = retrograde). `fuelSeconds`
+    // defaults to the starter pad's — pass a small value to test expiry.
+    spawnSat: (angle: number, radius: number, vFactor?: number, fuelSeconds?: number) => void;
     // Drop debris on orbit the same way. Defaults: random angle, LEO radius.
     spawnDebris: (angle?: number, radius?: number, vFactor?: number) => void;
   };
@@ -172,6 +206,7 @@ class EventBus {
         regions: [],
         income: 0,
         satellites: 0,
+        expiredSats: 0,
         minPerigee: 0,
         fleet: [],
         activeSite: "",

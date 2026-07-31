@@ -13,12 +13,16 @@ export interface HudState {
   // Gross revenue in $/s at this instant.
   income: number;
   sats: number;
+  // Satellites that ran out of fuel: still in orbit, earning nothing.
+  darkSats: number;
   satCap: number;
   debris: number;
   kesslerRisk: number;
   paused: boolean;
   consoleOpen: boolean;
   siteName: string;
+  // Service life of the satellites the active pad builds.
+  siteFuelSeconds: number;
   // The next pad or contract valuation will unlock, or null when all are open.
   nextUnlock: { name: string; at: number; kind: "pad" | "contract" } | null;
 }
@@ -122,7 +126,10 @@ export class GameHud {
         ? `$${s.nextUnlock.at} unlocks ${s.nextUnlock.name} (${s.nextUnlock.kind})`
         : "company worth — your score",
     );
-    this.siteText.setText(`pad: ${s.siteName}   (1/2/3 or TAB to switch)`);
+    // The pad line advertises both halves of a site upgrade: how hard it can
+    // throw is felt in the console, but how long its birds last is a number
+    // you'd otherwise never see until they started dying.
+    this.siteText.setText(`pad: ${s.siteName} · ${s.siteFuelSeconds}s sats   (1/2/3 or TAB)`);
 
     if (s.sats >= s.satCap) {
       this.launchStatus.setText(`launch — fleet full (${s.sats}/${s.satCap})`);
@@ -151,7 +158,14 @@ export class GameHud {
           ? "#ef9f27"
           : "#97c459",
     );
-    this.sats.setText(`sats  ${s.sats}/${s.satCap}`);
+    // Dark sats still count against the fleet cap and still collide, so they
+    // get called out rather than quietly inflating the headline number.
+    this.sats.setText(
+      s.darkSats > 0
+        ? `sats  ${s.sats}/${s.satCap}  (${s.darkSats} dark — D to clear)`
+        : `sats  ${s.sats}/${s.satCap}`,
+    );
+    this.sats.setColor(s.darkSats > 0 ? "#ef9f27" : "#8fa1bc");
     this.kesslerLabel.setText(`kessler risk · debris ${s.debris}`);
     this.kesslerBar.width = GameHud.BAR_W * Math.min(1, s.kesslerRisk);
     this.kesslerBar.fillColor =

@@ -57,6 +57,23 @@ describe("launch sites", () => {
     }
   });
 
+  it("better sites also build longer-lived satellites", () => {
+    // The second half of a site upgrade: not just reach, but birds that stay
+    // useful longer. Both curves must climb together or upgrading reads as a
+    // pure altitude choice again.
+    const byUnlock = [...SITES].sort((a, b) => a.unlockValuation - b.unlockValuation);
+    for (let i = 1; i < byUnlock.length; i++) {
+      expect(byUnlock[i].fuelSeconds).toBeGreaterThan(byUnlock[i - 1].fuelSeconds);
+    }
+  });
+
+  it("gives even the starter pad room for several boosts", () => {
+    // If a launch can't afford a handful of boosts, LEO stops being playable.
+    for (const s of SITES) {
+      expect(s.fuelSeconds / TUNING.boostFuel).toBeGreaterThanOrEqual(4);
+    }
+  });
+
   it("looks up by id", () => {
     expect(siteById(SITES[0].id)?.name).toBe(SITES[0].name);
     expect(siteById("nope")).toBeUndefined();

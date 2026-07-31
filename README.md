@@ -32,14 +32,29 @@ predictable, no orbital-mechanics degree required. What a boost _can't_ do is
 lift a satellite into a higher band; getting to MEO or GEO means launching
 there from a pad that can throw that hard.
 
+## Nothing stays up forever
+
+Every satellite launches with a tank of station-keeping fuel — the little bar
+under it — and burns it just by working. **Boosting costs a chunk of it**, so
+fighting drag in LEO literally spends your bird's working life.
+
+When the tank hits zero it goes **dark**: still in orbit, still big enough to
+kill something, but earning nothing. Press **`D`** to de-orbit it cleanly for
+pocket change, or leave it up there and let it become somebody's debris.
+
+So a fleet ages, and a fleet you launched all at once dies all at once. High
+orbits never need boosting, which means they spend none of their life fighting
+the atmosphere — another quiet reason to climb.
+
 ## Growing the company
 
 **Cash operates, valuation unlocks.** Revenue pays both: cash funds launches
 and boosts, while valuation (your cumulative earnings — the score) buys
 progress. It alternates between two kinds:
 
-- **Launch pads** — reach higher. Your starter pad can barely make LEO; later
-  pads lift the power ceiling until you can throw a GEO transfer.
+- **Launch pads** — reach higher, and build better. Your starter pad can barely
+  make LEO; later pads lift the power ceiling until you can throw a GEO
+  transfer, _and_ turn out satellites that stay useful much longer.
 - **Contract regions** — serve more. Each market you sign pays its own $/s
   while a satellite is over it, and they **add up**.
 
@@ -76,7 +91,7 @@ A good constellation mixes both — and the only way up is to earn your way ther
 | `Esc`             | Close the console                                |
 | Click a satellite | Select it (shows its predicted path)             |
 | `B`               | Boost the selected sat (else the lowest perigee) |
-| `D`               | De-orbit cleanly — no debris                     |
+| `D`               | De-orbit cleanly (else the first dark sat)       |
 | `Space`           | Pause / resume (the console works while paused)  |
 | Click / `Space`   | Start (menu) · Restart (after game over)         |
 

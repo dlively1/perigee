@@ -15,6 +15,7 @@ import {
   snapshot,
   spawnDebris,
   spawnSat,
+  togglePause,
   waitFor,
   waitForEvent,
   waitForEventAfter,
@@ -138,7 +139,10 @@ test("only the first contract region is signed at zero valuation", async ({ page
 });
 
 test("each new contract region adds its own revenue stream", async ({ page }) => {
-  await bootGame(page, { autoplay: true, timeScale: 2, debris: false });
+  // Boot PAUSED to lay the ring down at a single instant. Spawning ten sats
+  // under a running clock staggers them by a round trip each — enough drift to
+  // leave a seam in the ring, which makes coverage flicker and income wobble.
+  await bootGame(page, { autoplay: true, paused: true, timeScale: 2, debris: false });
   await waitForScene(page, "game");
 
   // A full ring above the atmosphere: every market is served continuously, so
@@ -146,6 +150,7 @@ test("each new contract region adds its own revenue stream", async ({ page }) =>
   for (let i = 0; i < TUNING.maxSatellites; i++) {
     await spawnSat(page, (i / TUNING.maxSatellites) * Math.PI * 2, 160);
   }
+  await togglePause(page);
   await waitFor(page, (s) => s.covered === true);
 
   // One contract signed → exactly one market's worth of income.
@@ -211,6 +216,85 @@ test("commanded de-orbit removes a sat cleanly, leaving no debris", async ({ pag
 
   const s = await snapshot(page);
   expect(s.debris).toBe(0);
+});
+
+test("a satellite that runs dry goes dark but stays in orbit", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 4, debris: false });
+  await waitForScene(page, "game");
+
+  await spawnSat(page, 0, 160, 1, 3); // three seconds of station-keeping
+  await waitFor(page, (s) => s.satellites === 1);
+
+  const dead = await waitForEvent(page, "sat-expired", 20_000);
+  expect(dead.id).toBeGreaterThan(0);
+  await waitFor(page, (s) => s.expiredSats === 1 && s.satellites === 0);
+
+  // Still up there — running dry doesn't drop it out of the sky, and it
+  // doesn't turn into debris either. It's just dead weight that earns nothing.
+  const s = await snapshot(page);
+  expect(s.fleet).toHaveLength(1);
+  expect(s.fleet[0].expired).toBe(true);
+  expect(s.fleet[0].fuel).toBe(0);
+  expect(s.debris).toBe(0);
+  expect(s.income).toBe(0);
+  expect(s.covered).toBe(false);
+});
+
+test("a dark satellite can't be boosted — only cleared", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 4, debris: false });
+  await waitForScene(page, "game");
+  await addCash(page, 500);
+
+  await spawnSat(page, 0, 160, 1, 2);
+  const dead = await waitForEvent(page, "sat-expired", 20_000);
+
+  await boost(page, dead.id);
+  const blockedEv = await waitForEvent(page, "action-blocked");
+  expect(blockedEv.action).toBe("boost");
+  expect(blockedEv.reason).toBe("fuel");
+
+  // De-orbit is the counter-play: pay a little to clear it before it's hit.
+  await deorbit(page, dead.id);
+  const gone = await waitForEvent(page, "deorbit");
+  expect(gone.reason).toBe("commanded");
+  await waitFor(page, (s) => s.expiredSats === 0 && s.fleet.length === 0);
+});
+
+test("boosting spends service life, not just cash", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 1, debris: false });
+  await waitForScene(page, "game");
+  await addCash(page, 500);
+
+  await spawnSat(page, 0, 130);
+  await waitFor(page, (s) => s.satellites === 1);
+
+  await boost(page);
+  const b = await waitForEvent(page, "boost");
+  // Fuel left is the launch load minus the boost, minus whatever drained
+  // while the test was getting there.
+  expect(b.fuel).toBeLessThanOrEqual(SITES[0].fuelSeconds - TUNING.boostFuel);
+  expect(b.fuel).toBeGreaterThan(SITES[0].fuelSeconds - TUNING.boostFuel - 20);
+});
+
+test("a better pad builds longer-lived satellites", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 1, debris: false });
+  await waitForScene(page, "game");
+  await addCash(page, 3000);
+
+  await launch(page, 0, 0.25);
+  await waitFor(page, (s) => s.fleet.length === 1);
+  const starter = await snapshot(page);
+  expect(starter.fleet[0].fuelMax).toBe(SITES[0].fuelSeconds);
+
+  await addValuation(page, SITES[2].unlockValuation);
+  await selectSite(page, SITES[2].id);
+  await waitFor(page, (s, id) => s.activeSite === id, 15_000, SITES[2].id);
+
+  await launch(page, 0, 0.25);
+  await waitFor(page, (s) => s.fleet.length === 2);
+  const both = await snapshot(page);
+  expect(both.fleet[1].fuelMax).toBe(SITES[2].fuelSeconds);
+  expect(both.fleet[1].fuelMax).toBeGreaterThan(both.fleet[0].fuelMax);
 });
 
 test("ambient debris arrives on its own and drives Kessler risk up", async ({ page }) => {

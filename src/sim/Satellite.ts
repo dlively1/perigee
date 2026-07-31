@@ -17,6 +17,13 @@ export interface Satellite extends BodyState {
   live: boolean;
   // Latches when perigee dips below critical so the event fires once per dip.
   critical: boolean;
+  // Station-keeping fuel in seconds, and what it launched with. Drains while
+  // live; boosts take a chunk. The pad that built it sets `fuelMax`.
+  fuel: number;
+  fuelMax: number;
+  // Fuel ran out: the satellite is DARK. Still in orbit, still a collision
+  // hazard, but it earns nothing and can't boost until you de-orbit it.
+  expired: boolean;
   // Orbit-raise maneuver: while > 0 the sat is on rails, gliding from
   // raiseFrom to raiseTo on a circular orbit (see circularStep).
   raiseRemaining: number;
@@ -33,6 +40,7 @@ export function createSatellite(
   padX: number,
   padY: number,
   ascentSeconds: number,
+  fuelSeconds: number,
 ): Satellite {
   return {
     id,
@@ -42,6 +50,9 @@ export function createSatellite(
     padY,
     live: false,
     critical: false,
+    fuel: fuelSeconds,
+    fuelMax: fuelSeconds,
+    expired: false,
     raiseRemaining: 0,
     raiseFrom: 0,
     raiseTo: 0,

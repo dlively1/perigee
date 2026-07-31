@@ -72,6 +72,20 @@ export const TUNING = {
   // coverage lingers this long after the last sat rotates off a region.
   coverageGraceSec: 0.8,
 
+  // Service life. Fuel is measured in SECONDS of station-keeping and drains
+  // 1:1 while a satellite is live, so a pad's `fuelSeconds` (src/sim/sites.ts)
+  // reads literally as "how long its birds work for". At zero the satellite
+  // goes DARK: it stops earning and can't boost, but it's still up there as a
+  // collision hazard until you pay to de-orbit it. That's what gives the
+  // de-orbit key a real job and puts an aging fleet on the clock.
+  //
+  // Boosts spend a chunk of that life up front, so keeping a LEO sat out of
+  // the atmosphere costs service time. High orbits need no boosts and burn
+  // none of it — which is a large part of what buys back their lower pay rate.
+  fuelDrainPerSec: 1,
+  boostFuel: 15,
+  fuelWarnSec: 25, // below this the sat reads as near end-of-life
+
   // Economy. Revenue rates live per-region in src/sim/regions.ts.
   startingCash: 650,
   launchCost: 110,

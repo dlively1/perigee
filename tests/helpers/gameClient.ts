@@ -59,6 +59,10 @@ export async function deorbit(page: Page, id?: number): Promise<void> {
   await page.evaluate((i) => window.__PERIGEE!.input.deorbit(i), id);
 }
 
+export async function togglePause(page: Page): Promise<void> {
+  await page.evaluate(() => window.__PERIGEE!.input.pause());
+}
+
 export async function addCash(page: Page, amount: number): Promise<void> {
   await page.evaluate((a) => window.__PERIGEE!.cheat.addCash(a), amount);
 }
@@ -74,16 +78,20 @@ export async function selectSite(page: Page, siteId: string): Promise<void> {
 
 // Place a live satellite directly on orbit (test shortcut): circular speed at
 // `radius` scaled by `vFactor` (1 = circular, negative = retrograde).
+// `fuelSeconds` defaults in-page to the starter pad's service life — pass a
+// small number to watch a satellite run dry without waiting minutes.
 export async function spawnSat(
   page: Page,
   angle: number,
   radius: number,
   vFactor = 1,
+  fuelSeconds?: number,
 ): Promise<void> {
-  await page.evaluate(([a, r, v]) => window.__PERIGEE!.cheat.spawnSat(a, r, v), [
+  await page.evaluate(([a, r, v, f]) => window.__PERIGEE!.cheat.spawnSat(a!, r!, v!, f), [
     angle,
     radius,
     vFactor,
+    fuelSeconds,
   ] as const);
 }
 
