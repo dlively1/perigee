@@ -7,6 +7,11 @@ export interface HudState {
   cash: number;
   valuation: number;
   covered: boolean;
+  // Contract markets served right now, out of those valuation has signed.
+  regionsCovered: number;
+  regionsSigned: number;
+  // Gross revenue in $/s at this instant.
+  income: number;
   sats: number;
   satCap: number;
   debris: number;
@@ -14,8 +19,8 @@ export interface HudState {
   paused: boolean;
   consoleOpen: boolean;
   siteName: string;
-  // The next launch site valuation will unlock, or null when all are open.
-  nextUnlock: { name: string; at: number } | null;
+  // The next pad or contract valuation will unlock, or null when all are open.
+  nextUnlock: { name: string; at: number; kind: "pad" | "contract" } | null;
 }
 
 // Always-on overlay built for legibility: every number says what it is and
@@ -114,7 +119,7 @@ export class GameHud {
     this.valuationText.setText(`VALUATION  $${Math.round(s.valuation)}`);
     this.valuationSub.setText(
       s.nextUnlock
-        ? `unlocks ${s.nextUnlock.name} at $${s.nextUnlock.at}`
+        ? `$${s.nextUnlock.at} unlocks ${s.nextUnlock.name} (${s.nextUnlock.kind})`
         : "company worth — your score",
     );
     this.siteText.setText(`pad: ${s.siteName}   (1/2/3 or TAB to switch)`);
@@ -133,8 +138,19 @@ export class GameHud {
       this.launchStatus.setColor("#97c459");
     }
 
-    this.coverage.setText(s.covered ? "COVERAGE  ● earning" : "COVERAGE  ○ gap — no income");
-    this.coverage.setColor(s.covered ? "#97c459" : "#e24b4a");
+    // Markets served, and what that is actually worth per second. The $/s is
+    // the number that makes spreading the fleet legible: cover a second region
+    // and watch it double.
+    this.coverage.setText(
+      `MARKETS  ${s.regionsCovered}/${s.regionsSigned}  ·  $${Math.round(s.income)}/s`,
+    );
+    this.coverage.setColor(
+      s.regionsCovered === 0
+        ? "#e24b4a"
+        : s.regionsCovered < s.regionsSigned
+          ? "#ef9f27"
+          : "#97c459",
+    );
     this.sats.setText(`sats  ${s.sats}/${s.satCap}`);
     this.kesslerLabel.setText(`kessler risk · debris ${s.debris}`);
     this.kesslerBar.width = GameHud.BAR_W * Math.min(1, s.kesslerRisk);

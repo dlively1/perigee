@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { TUNING } from "../src/sim/constants";
 import { SITES } from "../src/sim/sites";
+import { REGIONS, maxIncome } from "../src/sim/regions";
 import { bandFor } from "../src/sim/bands";
 import {
   addCash,
@@ -124,6 +125,62 @@ test("sustained coverage earns revenue and grows valuation", async ({ page }) =>
   await waitFor(page, (s) => s.covered === true);
   await waitForEvent(page, "revenue");
   await waitFor(page, (s) => s.valuation > 0);
+});
+
+test("only the first contract region is signed at zero valuation", async ({ page }) => {
+  await bootGame(page, { autoplay: true, debris: false });
+  await waitForScene(page, "game");
+
+  const s = await snapshot(page);
+  expect(s.regions).toHaveLength(REGIONS.length);
+  expect(s.regions.filter((r) => r.unlocked).map((r) => r.id)).toEqual([REGIONS[0].id]);
+  expect(s.income).toBe(0);
+});
+
+test("each new contract region adds its own revenue stream", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 2, debris: false });
+  await waitForScene(page, "game");
+
+  // A full ring above the atmosphere: every market is served continuously, so
+  // income depends only on how many contracts are signed — no orbital luck.
+  for (let i = 0; i < TUNING.maxSatellites; i++) {
+    await spawnSat(page, (i / TUNING.maxSatellites) * Math.PI * 2, 160);
+  }
+  await waitFor(page, (s) => s.covered === true);
+
+  // One contract signed → exactly one market's worth of income.
+  const one = await snapshot(page);
+  expect(one.regions.filter((r) => r.unlocked)).toHaveLength(1);
+  expect(one.income).toBe(REGIONS[0].payRate);
+
+  // Signing the second stacks on top rather than replacing it.
+  await addValuation(page, REGIONS[1].unlockValuation);
+  const signed = await waitForEvent(page, "region-unlocked");
+  expect(signed.regionId).toBe(REGIONS[1].id);
+  await waitFor(
+    page,
+    (s, want) => s.income >= (want as number),
+    15_000,
+    REGIONS[0].payRate + REGIONS[1].payRate,
+  );
+
+  // All three: income is the full ceiling.
+  await addValuation(page, REGIONS[2].unlockValuation);
+  await waitFor(page, (s) => s.regions.every((r) => r.unlocked && r.covered));
+  const all = await snapshot(page);
+  expect(all.income).toBe(maxIncome());
+});
+
+test("coverage events name the region that started or lapsed", async ({ page }) => {
+  await bootGame(page, { autoplay: true, timeScale: 4, debris: false });
+  await waitForScene(page, "game");
+
+  // One satellite sweeps past the ground: it picks the region up, then loses it.
+  await spawnSat(page, 0, 160);
+  const start = await waitForEvent(page, "coverage-start", 20_000);
+  expect(REGIONS.map((r) => r.id)).toContain(start.regionId);
+  const gap = await waitForEvent(page, "coverage-gap", 20_000);
+  expect(gap.regionId).toBe(start.regionId);
 });
 
 test("an unaffordable launch is refused with a typed reason", async ({ page }) => {

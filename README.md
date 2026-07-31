@@ -4,8 +4,8 @@
 > real drag, and two ways to lose.
 
 You run a scrappy space-internet company. **Launch** rockets from your pad into
-real Newtonian orbits, earn revenue by holding **coverage** over a contracted
-ground region, and fight the atmosphere: any orbit whose **perigee** dips low
+real Newtonian orbits, earn revenue by holding **coverage** over contracted
+ground markets, and fight the atmosphere: any orbit whose **perigee** dips low
 gets dragged down a little on every pass. **Boost** them back up to keep birds
 alive, **de-orbit** dying ones cleanly before they become junk. Let cash hit zero
 and you're bankrupt; let debris pile up and a **Kessler cascade** graveyards
@@ -35,11 +35,15 @@ there from a pad that can throw that hard.
 ## Growing the company
 
 **Cash operates, valuation unlocks.** Revenue pays both: cash funds launches
-and boosts, while valuation (your cumulative earnings — the score) opens
-better **launch pads**. Your starter pad can barely reach LEO; the pads you
-unlock lift the power ceiling until you can throw a GEO transfer.
+and boosts, while valuation (your cumulative earnings — the score) buys
+progress. It alternates between two kinds:
 
-That matters because altitude is a trade:
+- **Launch pads** — reach higher. Your starter pad can barely make LEO; later
+  pads lift the power ceiling until you can throw a GEO transfer.
+- **Contract regions** — serve more. Each market you sign pays its own $/s
+  while a satellite is over it, and they **add up**.
+
+Those two pull against each other, because altitude is a trade:
 
 | Band    | Drag & debris     | Footprint | Pays      |
 | ------- | ----------------- | --------- | --------- |
@@ -47,9 +51,17 @@ That matters because altitude is a trade:
 | **MEO** | clear             | wider     | 70%       |
 | **GEO** | clear             | widest    | 45%       |
 
-Low orbits print money but need constant boosting and share the sky with
-junk. High orbits run themselves but pay less. A good constellation mixes
-both — and the only way up is to earn your way there.
+Low orbits print money but need constant boosting and share the sky with junk.
+High orbits run themselves but pay less — so why ever go up?
+
+**Because of where the markets sit.** One satellite serves one place at a time,
+so income scales with how well your fleet is _spread_, not how big it is. And
+two of the three markets sit close enough together that a wide high-orbit
+footprint can straddle **both at once** — one bird doing two markets' work.
+That's what buys back the lower rate. A LEO bird parked between them reaches
+neither and has to pick a side.
+
+A good constellation mixes both — and the only way up is to earn your way there.
 
 ## Controls
 

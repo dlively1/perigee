@@ -63,18 +63,19 @@ export const TUNING = {
   // Beyond this radius a body is gone for good ("escaped").
   escapeRadius: 1400,
 
-  // Coverage — the contract region is a point on the ground; a sat covers it
+  // Coverage — a contract region is a point on the ground; a sat covers it
   // when its ground angle is within ±footprintHalfWidth of the region.
+  // Which regions exist, where they sit, and what they pay is data in
+  // src/sim/regions.ts (their spacing is a designed mechanic, not decoration).
   footprintHalfWidth: (18 * Math.PI) / 180, // ±18°
   // Brief footprint gaps (a sat handing off to the next) don't cut revenue —
-  // coverage lingers this long after the last sat rotates off the region.
+  // coverage lingers this long after the last sat rotates off a region.
   coverageGraceSec: 0.8,
 
-  // Economy
+  // Economy. Revenue rates live per-region in src/sim/regions.ts.
   startingCash: 650,
   launchCost: 110,
   boostCost: 22,
-  coverageRate: 20, // $/s earned while the region is covered
   deorbitCost: 8, // commanded, clean removal — cheaper than a boost
 
   // Debris & Kessler cascade. Ambient junk arrives on a seeded schedule into

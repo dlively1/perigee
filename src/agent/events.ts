@@ -52,9 +52,12 @@ export type GameEvent =
     }
   // Valuation crossed a launch site's threshold — it's now available.
   | { type: "site-unlocked"; t: number; siteId: string }
-  // Coverage of the contract region began / lapsed.
-  | { type: "coverage-start"; t: number }
-  | { type: "coverage-gap"; t: number }
+  // Valuation signed a new contract region — another market to serve.
+  | { type: "region-unlocked"; t: number; regionId: string }
+  // Coverage of a specific contract region began / lapsed. Each region tracks
+  // its own coverage, so these fire once per region, not once globally.
+  | { type: "coverage-start"; t: number; regionId: string }
+  | { type: "coverage-gap"; t: number; regionId: string }
   | { type: "revenue"; t: number; cash: number; valuation: number }
   | { type: "bankruptcy"; t: number; valuation: number }
   | { type: "game-over"; t: number; reason: "bankruptcy" | "kessler"; valuation: number }
@@ -72,8 +75,15 @@ export interface GameSnapshot {
   cash: number;
   // Cumulative revenue earned — the score.
   valuation: number;
-  // Is the contract region currently served by a live satellite?
+  // Is ANY signed contract region currently served? (Per-region detail lives
+  // in `regions` — this stays a quick "am I earning at all?" read.)
   covered: boolean;
+  // Every contract region, signed or not: whether valuation has unlocked it
+  // and whether a satellite is serving it right now.
+  regions: { id: string; unlocked: boolean; covered: boolean }[];
+  // Current gross revenue in $/s — the sum of every covered region's pay rate
+  // scaled by the band of the best-paying satellite serving it.
+  income: number;
   // Count of live satellites (excludes rockets still climbing / botched lobs).
   satellites: number;
   // Lowest perigee (px from Earth's center) across live sats, 0 when none —
@@ -159,6 +169,8 @@ class EventBus {
         cash: 0,
         valuation: 0,
         covered: false,
+        regions: [],
+        income: 0,
         satellites: 0,
         minPerigee: 0,
         fleet: [],

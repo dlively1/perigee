@@ -4,7 +4,7 @@ Soft-real-time satellite-strategy game. You're a scrappy space-internet
 company: **launch** rockets from your pad into real Newtonian orbits (aim +
 power pick the burnout state), fight atmospheric **drag** on every low perigee
 pass by spending on orbit-raising **boosts**, and earn by holding **sustained
-coverage** over a contracted ground region — without running your cash to zero
+coverage** over contracted ground regions — without running your cash to zero
 (bankruptcy) or littering the sky into a **Kessler cascade**. Score is your
 company **valuation**.
 
@@ -78,9 +78,9 @@ Since the trajectory-launch rewrite, orbits are REAL 2D Newtonian conics:
   transfer; ≈ 0.62 → GEO transfer; near 1.0 flirts with escape. Unboosted LEO
   decays in ~70s with ~30s of critical warning.
 
-## Progression (bands + sites)
+## Progression (bands + sites + regions)
 
-Two data registries drive the whole meta layer — extend these, not the scene:
+Three data registries drive the whole meta layer — extend these, not the scene:
 
 - **`src/sim/bands.ts`** — LEO / MEO / GEO, classified by current radius (so
   an eccentric orbit is judged by where it is _now_). Higher = safer (above
@@ -92,9 +92,27 @@ Two data registries drive the whole meta layer — extend these, not the scene:
   auto-unlocks when **valuation** reaches `unlockValuation`. That's the
   economy split made concrete: **cash operates, valuation unlocks.** The
   starter pad tops out around LEO; the best pad reaches GEO transfers.
+- **`src/sim/regions.ts`** — the contract markets you're paid to serve, also
+  fixed to the planet. Each pays `payRate` $/s while covered, and signs on at
+  its own `unlockValuation`.
 
-When several sats cover the region at once, the best-paying (lowest) band sets
-the rate. Unlocks are checked as revenue accrues, and emit `site-unlocked`.
+**Region spacing is a mechanic, not decoration.** With a single market the
+bands were a strict downgrade — MEO/GEO pay less and bought nothing. So:
+
+- `pacific` sits far from the others: serving it needs a genuinely separate
+  satellite. It is the "spread your fleet" market.
+- `gulf` + `atlantic` are a **twin pair** ~0.85 rad apart. A LEO footprint
+  (~0.72 rad wide) cannot span that gap; a MEO/GEO footprint (~1.06 rad) can
+  straddle both at once. One high bird doing two markets' work is the concrete
+  payoff for climbing, and what makes the lower high-band rate worth paying.
+
+The straddle geometry is pinned by tests in `tests/unit/progression.test.ts` —
+change the angles and those tests tell you exactly what you broke.
+
+Resolution is **per region, then summed**: within a region the best-paying
+(lowest) band sets the rate; across regions the pay adds up. That addition is
+the reason to spread a fleet instead of stacking it over one market. Unlocks
+are checked as revenue accrues and emit `site-unlocked` / `region-unlocked`.
 
 ## Repository map
 
@@ -116,6 +134,8 @@ src/
     Debris.ts           Debris = physics body + source tag
     bands.ts            LEO/MEO/GEO registry — classification, pay rate, footprint
     sites.ts            Launch-pad registry — angle, power cap, valuation unlock
+    regions.ts          Contract-market registry — angle, $/s, valuation unlock
+                        (the angles encode the straddle mechanic — read it)
   scenes/
     BootScene.ts        Emit boot → menu
     MenuScene.ts        Title; SPACE/click → game (or autoplay)
@@ -157,7 +177,8 @@ window.__PERIGEE = {
   events: GameEvent[],          // ring buffer, last ~2000 entries
   snapshot: {
     ready, scene, seed, paused, gameOver, gameOverReason,
-    cash, valuation, covered, satellites, minPerigee,
+    cash, valuation, covered, income, satellites, minPerigee,
+    regions: [{ id, unlocked, covered }],   // covered = ANY of them; income = $/s
     fleet: [{ id, live, perigee, apogee }],
     activeSite, unlockedSites: string[],
     debris, kesslerRisk, fps, entities, timeScale
@@ -171,7 +192,7 @@ window.__PERIGEE = {
   },
   cheat: {                      // test shortcuts — jump to a state
     addCash(amount),
-    addValuation(amount),                 // drives site unlocks
+    addValuation(amount),                 // drives site + region unlocks
     spawnSat(angle, radius, vFactor?),    // live sat on orbit (1 = circular)
     spawnDebris(angle?, radius?, vFactor?)
   },
@@ -187,7 +208,9 @@ window.__PERIGEE = {
 `debris-spawn`, `debris-decay`, `collision`, `debris-collision`,
 `kessler-cascade`,
 `action-blocked` (action: launch | boost | deorbit | select-site),
-`site-unlocked`, `coverage-start`, `coverage-gap`, `revenue`, `bankruptcy`,
+`site-unlocked`, `region-unlocked`,
+`coverage-start` / `coverage-gap` (both carry `regionId` — they fire per
+region, not once globally), `revenue`, `bankruptcy`,
 `game-over` (reason: bankruptcy | kessler), `frame`. All carry `t` (ms since
 boot, monotonic). Exact shapes in `src/agent/events.ts`.
 
@@ -206,8 +229,9 @@ close over Node-side values; pass them via the `arg` parameter.
   payoff is replaying a weird run from a play session, and keeping the door
   open to seeded daily-challenge runs later. It costs one lint rule, so it
   stays; just don't treat "deterministic" as something the game is _about_.
-  Only four things consume the RNG: contract region start angle, ambient
-  debris timing/placement, fragment scatter, and (cosmetic) landmass shapes.
+  Only three things consume the RNG: ambient debris timing/placement, fragment
+  scatter, and (cosmetic) landmass shapes. Contract regions used to be a fourth
+  — they're fixed data now, because their spacing is a designed mechanic.
 - **Rules are pure and tested.** New sim math goes in `src/core/` as a pure
   function with a Vitest test — not buried in `GameScene`. Unit tests run in
   milliseconds; the e2e suite takes longer.
@@ -237,7 +261,9 @@ action-blocked feedback), **trajectory launch** (real Newtonian orbits, the
 launch console, atmosphere drag), **bands + sites** (LEO/MEO/GEO,
 valuation-unlocked launch pads, altitude/pay trade), **playtest pass**
 (boost simplified to an orbit-raise, debris–debris collisions so cascades
-self-sustain, satellite art with footprint arcs).
+self-sustain, satellite art with footprint arcs), **multiple contract regions**
+(markets that unlock on valuation and pay additively; the twin-pair spacing
+that finally makes climbing worth the lower rate).
 
 Deferred (do not add without scoping): eclipse/battery, explicit contracts +
 funding rounds, tech tree, launch failures, de-orbit tugs.

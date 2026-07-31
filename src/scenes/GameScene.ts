@@ -25,6 +25,20 @@ import {
 import { accrueRevenue, canAfford, isBankrupt, spend, type Wallet } from "../core/economy";
 import { BANDS, bandFor, footprintHalfWidthFor, rateMultiplier } from "../sim/bands";
 import { SITES, siteById, sitesUnlockedFor, type SiteDef } from "../sim/sites";
+import { REGIONS, regionsUnlockedFor, type RegionDef } from "../sim/regions";
+
+// Live coverage bookkeeping for one contract region. The region's ground angle
+// isn't stored — it's derived from `earthSpin` + the def's angle, since regions
+// are fixed to the planet and rotate with it exactly like the launch pads do.
+interface RegionState {
+  def: RegionDef;
+  unlocked: boolean;
+  covered: boolean;
+  // Seconds of grace left after the last sat rotated off (see coverageGraceSec).
+  linger: number;
+  // Band rate multiplier of the best-paying sat currently serving this region.
+  rateMult: number;
+}
 
 const COL = {
   earth: 0x17457f,
@@ -60,12 +74,12 @@ export class GameScene extends Phaser.Scene {
   private selectedId: number | null = null;
 
   private wallet: Wallet = { cash: TUNING.startingCash, valuation: 0 };
-  private regionAngle = 0; // contract region's ground angle (rotates with Earth)
   private earthSpin = 0;
+  private regions: RegionState[] = [];
+  // True while at least one signed region is served — the "am I earning?" read.
   private covered = false;
-  private coverageLinger = 0;
-  // Band rate multiplier of whoever is currently serving the region.
-  private coverageRateMult = 1;
+  // Gross $/s right now, summed across covered regions.
+  private income = 0;
   private landmasses: { angle: number; dist: number; pts: { x: number; y: number }[] }[] = [];
 
   // Launch console state. fpaDeg 0 = tangential/ideal; power is the 0..1 dial
@@ -106,11 +120,16 @@ export class GameScene extends Phaser.Scene {
     this.nextId = 1;
     this.selectedId = null;
     this.wallet = { cash: TUNING.startingCash, valuation: 0 };
-    this.regionAngle = this.rng.range(0, TWO_PI);
     this.earthSpin = 0;
+    this.regions = REGIONS.map((def) => ({
+      def,
+      unlocked: def.unlockValuation <= 0,
+      covered: false,
+      linger: 0,
+      rateMult: 1,
+    }));
     this.covered = false;
-    this.coverageLinger = 0;
-    this.coverageRateMult = 1;
+    this.income = 0;
     this.consoleOpen = false;
     this.fpaDeg = 0;
     this.power = 0.3;
@@ -257,12 +276,21 @@ export class GameScene extends Phaser.Scene {
     this.pushSnapshot();
   }
 
-  // The next site valuation hasn't bought yet — the progression carrot.
-  private nextUnlock(): { name: string; at: number } | null {
-    const locked = SITES.filter((s) => !this.unlockedIds.has(s.id));
+  // The nearest thing valuation hasn't bought yet — the progression carrot.
+  // Pads and contracts interleave, so both are candidates.
+  private nextUnlock(): { name: string; at: number; kind: "pad" | "contract" } | null {
+    const locked: { name: string; at: number; kind: "pad" | "contract" }[] = [
+      ...SITES.filter((s) => !this.unlockedIds.has(s.id)).map((s) => ({
+        name: s.name,
+        at: s.unlockValuation,
+        kind: "pad" as const,
+      })),
+      ...this.regions
+        .filter((r) => !r.unlocked)
+        .map((r) => ({ name: r.def.name, at: r.def.unlockValuation, kind: "contract" as const })),
+    ];
     if (!locked.length) return null;
-    const next = locked.reduce((a, b) => (a.unlockValuation <= b.unlockValuation ? a : b));
-    return { name: next.name, at: next.unlockValuation };
+    return locked.reduce((a, b) => (a.at <= b.at ? a : b));
   }
 
   private cycleSite(): void {
@@ -272,14 +300,29 @@ export class GameScene extends Phaser.Scene {
     this.doSelectSite(open[(idx + 1) % open.length].id);
   }
 
-  // Valuation is the unlock currency: crossing a site's threshold opens it.
+  // Valuation is the unlock currency: crossing a threshold opens a pad (reach
+  // higher) or signs a contract region (serve more).
   private checkUnlocks(): void {
+    const bus = getEventBus();
     for (const site of sitesUnlockedFor(this.wallet.valuation)) {
       if (this.unlockedIds.has(site.id)) continue;
       this.unlockedIds.add(site.id);
-      getEventBus().emit({ type: "site-unlocked", t: 0, siteId: site.id });
+      bus.emit({ type: "site-unlocked", t: 0, siteId: site.id });
       this.hud.toast(`${site.name} unlocked — press ${SITES.indexOf(site) + 1} to use it`);
     }
+    const open = new Set(regionsUnlockedFor(this.wallet.valuation).map((r) => r.id));
+    for (const rs of this.regions) {
+      if (rs.unlocked || !open.has(rs.def.id)) continue;
+      rs.unlocked = true;
+      bus.emit({ type: "region-unlocked", t: 0, regionId: rs.def.id });
+      this.hud.toast(`new contract: ${rs.def.name} — $${rs.def.payRate}/s while it's covered`);
+    }
+  }
+
+  // Regions are painted on the planet, so they rotate with it — exactly like
+  // the launch pads. Nothing to integrate; it's a function of the spin.
+  private regionScreenAngle(def: RegionDef): number {
+    return normalizeAngle(this.earthSpin + def.angle);
   }
 
   // ----- actions -----
@@ -539,7 +582,7 @@ export class GameScene extends Phaser.Scene {
 
   private step(dt: number): void {
     const bus = getEventBus();
-    this.regionAngle = advanceAngle(this.regionAngle, TUNING.earthOmega, dt);
+    // One spin drives everything painted on the planet: pads and regions alike.
     this.earthSpin = advanceAngle(this.earthSpin, TUNING.earthOmega, dt);
 
     // Ambient external junk arrives on a seeded schedule into the low band.
@@ -702,32 +745,49 @@ export class GameScene extends Phaser.Scene {
       this.flashes = this.flashes.filter((f) => f.ttl > 0);
     }
 
-    // Coverage + revenue. Each sat serves through its own band-scaled
-    // footprint: higher orbits see more ground but pay a lower rate (latency).
-    // When several sats cover at once, the best-paying one sets the rate.
-    let rawCovered = false;
-    let rate = 0;
-    for (const s of this.sats) {
-      if (!s.live || s.ascentRemaining > 0) continue;
-      const r = Math.hypot(s.x, s.y);
-      const hw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
-      if (!isAngleCovered([Math.atan2(s.y, s.x)], this.regionAngle, hw)) continue;
-      rawCovered = true;
-      rate = Math.max(rate, rateMultiplier(r));
+    // Coverage + revenue, resolved per contract region. Each sat serves through
+    // its own band-scaled footprint: higher orbits see more ground but pay a
+    // lower rate (latency). Within one region the best-paying sat sets the
+    // rate; across regions the pay ADDS UP — which is the whole reason to
+    // spread the fleet instead of stacking it over one market.
+    this.income = 0;
+    let anyCovered = false;
+    for (const rs of this.regions) {
+      if (!rs.unlocked) continue;
+      const ra = this.regionScreenAngle(rs.def);
+      let rawCovered = false;
+      let rate = 0;
+      for (const s of this.sats) {
+        if (!s.live || s.ascentRemaining > 0) continue;
+        const r = Math.hypot(s.x, s.y);
+        const hw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
+        if (!isAngleCovered([Math.atan2(s.y, s.x)], ra, hw)) continue;
+        rawCovered = true;
+        rate = Math.max(rate, rateMultiplier(r));
+      }
+      if (rawCovered) {
+        rs.linger = TUNING.coverageGraceSec;
+        rs.rateMult = rate;
+      } else {
+        rs.linger = Math.max(0, rs.linger - dt);
+      }
+      const nowCovered = rawCovered || rs.linger > 0;
+      if (nowCovered && !rs.covered) {
+        bus.emit({ type: "coverage-start", t: 0, regionId: rs.def.id });
+      }
+      if (!nowCovered && rs.covered) {
+        bus.emit({ type: "coverage-gap", t: 0, regionId: rs.def.id });
+      }
+      rs.covered = nowCovered;
+      if (nowCovered) {
+        this.income += rs.def.payRate * rs.rateMult;
+        anyCovered = true;
+      }
     }
-    if (rawCovered) {
-      this.coverageLinger = TUNING.coverageGraceSec;
-      this.coverageRateMult = rate;
-    } else {
-      this.coverageLinger = Math.max(0, this.coverageLinger - dt);
-    }
-    const nowCovered = rawCovered || this.coverageLinger > 0;
-    if (nowCovered && !this.covered) bus.emit({ type: "coverage-start", t: 0 });
-    if (!nowCovered && this.covered) bus.emit({ type: "coverage-gap", t: 0 });
-    this.covered = nowCovered;
+    this.covered = anyCovered;
 
-    if (nowCovered) {
-      this.wallet = accrueRevenue(this.wallet, TUNING.coverageRate * this.coverageRateMult, dt);
+    if (this.income > 0) {
+      this.wallet = accrueRevenue(this.wallet, this.income, dt);
       this.checkUnlocks();
       this.revenueAccum += dt;
       if (this.revenueAccum >= 0.5) {
@@ -773,19 +833,18 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(1, COL.atmosphere, 0.25);
     g.strokeCircle(this.cx, this.cy, TUNING.atmosphereCeiling);
 
-    // Contract region arc on the rim.
+    // Contract regions on the rim: green while served, red while lapsed. Ones
+    // valuation hasn't signed yet are drawn as dim ghosts — visible money you
+    // can't collect, so the next unlock has somewhere to land.
     const hw = TUNING.footprintHalfWidth;
-    g.lineStyle(6, this.covered ? COL.covered : COL.gap, 1);
-    g.beginPath();
-    g.arc(
-      this.cx,
-      this.cy,
-      TUNING.earthRadius + 4,
-      this.regionAngle - hw,
-      this.regionAngle + hw,
-      false,
-    );
-    g.strokePath();
+    for (const rs of this.regions) {
+      const a = this.regionScreenAngle(rs.def);
+      if (rs.unlocked) g.lineStyle(6, rs.covered ? COL.covered : COL.gap, 1);
+      else g.lineStyle(3, COL.guide, 0.7);
+      g.beginPath();
+      g.arc(this.cx, this.cy, TUNING.earthRadius + 4, a - hw, a + hw, false);
+      g.strokePath();
+    }
 
     // Earth + continents.
     g.fillStyle(COL.earth, 1);
@@ -846,7 +905,9 @@ export class GameScene extends Phaser.Scene {
       // contract region — the main read for "is this bird earning?".
       if (s.live) {
         const fw = footprintHalfWidthFor(r, TUNING.footprintHalfWidth);
-        const serving = Math.abs(angleDelta(angle, this.regionAngle)) <= fw;
+        const serving = this.regions.some(
+          (rs) => rs.unlocked && Math.abs(angleDelta(angle, this.regionScreenAngle(rs.def))) <= fw,
+        );
         g.lineStyle(2, serving ? COL.covered : color, serving ? 0.75 : 0.22);
         g.beginPath();
         g.arc(this.cx, this.cy, r, angle - fw, angle + fw, false);
@@ -913,6 +974,9 @@ export class GameScene extends Phaser.Scene {
       cash: this.wallet.cash,
       valuation: this.wallet.valuation,
       covered: this.covered,
+      regionsCovered: this.regions.filter((r) => r.unlocked && r.covered).length,
+      regionsSigned: this.regions.filter((r) => r.unlocked).length,
+      income: this.income,
       sats: this.sats.length,
       satCap: TUNING.maxSatellites,
       debris: this.debris.length,
@@ -1017,6 +1081,12 @@ export class GameScene extends Phaser.Scene {
       cash: this.wallet.cash,
       valuation: this.wallet.valuation,
       covered: this.covered,
+      regions: this.regions.map((r) => ({
+        id: r.def.id,
+        unlocked: r.unlocked,
+        covered: r.covered,
+      })),
+      income: this.income,
       satellites: live,
       minPerigee: live ? minPerigee : 0,
       fleet,
