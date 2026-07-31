@@ -470,6 +470,30 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  // Throw fragments outward around the impact point instead of stacking them
+  // on it. Coincident fragments sit inside collision range of one another and
+  // chain-react instantly; spreading them (plus their settle window) makes a
+  // cascade something that builds over time instead of detonating in a frame.
+  private scatterFragments(
+    out: BodyState[],
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    count: number,
+  ): void {
+    const phase = this.rng.range(0, TWO_PI);
+    for (let i = 0; i < count; i++) {
+      const a = phase + (i / count) * TWO_PI;
+      out.push({
+        x: x + Math.cos(a) * TUNING.fragmentScatter,
+        y: y + Math.sin(a) * TUNING.fragmentScatter,
+        vx: vx + Math.cos(a) * TUNING.fragmentSpeedJitter,
+        vy: vy + Math.sin(a) * TUNING.fragmentSpeedJitter,
+      });
+    }
+  }
+
   private endGame(reason: "bankruptcy" | "kessler"): void {
     if (this.gameOver) return;
     this.gameOver = true;
@@ -583,6 +607,7 @@ export class GameScene extends Phaser.Scene {
     // Debris: same physics; burns up or leaves.
     const deadDebris: number[] = [];
     for (const d of this.debris) {
+      if (d.settleRemaining > 0) d.settleRemaining = Math.max(0, d.settleRemaining - dt);
       stepBody(TUNING.mu, d, dt, DRAG);
       const r = Math.hypot(d.x, d.y);
       if (r <= TUNING.earthRadius + 2 || r > TUNING.escapeRadius) {
@@ -598,7 +623,7 @@ export class GameScene extends Phaser.Scene {
     for (const s of this.sats) {
       if (s.ascentRemaining > 0 || deadIds.has(s.id)) continue;
       for (const d of this.debris) {
-        if (deadDebris.includes(d.id)) continue;
+        if (deadDebris.includes(d.id) || d.settleRemaining > 0) continue;
         const dx = s.x - d.x;
         const dy = s.y - d.y;
         if (dx * dx + dy * dy > TUNING.collisionDist * TUNING.collisionDist) continue;
@@ -614,14 +639,14 @@ export class GameScene extends Phaser.Scene {
         });
         bus.emit({ type: "deorbit", t: 0, id: s.id, reason: "collision" });
         this.flashes.push({ x: s.x, y: s.y, ttl: 0.4 });
-        for (let i = 0; i < TUNING.fragmentsPerCollision; i++) {
-          fragments.push({
-            x: (s.x + d.x) / 2,
-            y: (s.y + d.y) / 2,
-            vx: (s.vx + d.vx) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
-            vy: (s.vy + d.vy) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
-          });
-        }
+        this.scatterFragments(
+          fragments,
+          (s.x + d.x) / 2,
+          (s.y + d.y) / 2,
+          (s.vx + d.vx) / 2,
+          (s.vy + d.vy) / 2,
+          TUNING.fragmentsPerCollision,
+        );
         break;
       }
     }
@@ -631,24 +656,24 @@ export class GameScene extends Phaser.Scene {
     // run away on its own even after every satellite is gone.
     for (let i = 0; i < this.debris.length; i++) {
       const a = this.debris[i];
-      if (deadDebris.includes(a.id)) continue;
+      if (deadDebris.includes(a.id) || a.settleRemaining > 0) continue;
       for (let j = i + 1; j < this.debris.length; j++) {
         const b = this.debris[j];
-        if (deadDebris.includes(b.id)) continue;
+        if (deadDebris.includes(b.id) || b.settleRemaining > 0) continue;
         const dx = a.x - b.x;
         const dy = a.y - b.y;
         if (dx * dx + dy * dy > TUNING.collisionDist * TUNING.collisionDist) continue;
         deadDebris.push(a.id, b.id);
         bus.emit({ type: "debris-collision", t: 0, aId: a.id, bId: b.id });
         this.flashes.push({ x: a.x, y: a.y, ttl: 0.3 });
-        for (let k = 0; k < TUNING.fragmentsPerDebrisCollision; k++) {
-          fragments.push({
-            x: (a.x + b.x) / 2,
-            y: (a.y + b.y) / 2,
-            vx: (a.vx + b.vx) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
-            vy: (a.vy + b.vy) / 2 + this.rng.range(-1, 1) * TUNING.fragmentSpeedJitter,
-          });
-        }
+        this.scatterFragments(
+          fragments,
+          (a.x + b.x) / 2,
+          (a.y + b.y) / 2,
+          (a.vx + b.vx) / 2,
+          (a.vy + b.vy) / 2,
+          TUNING.fragmentsPerDebrisCollision,
+        );
         break;
       }
     }
@@ -661,7 +686,7 @@ export class GameScene extends Phaser.Scene {
     if (deadDebris.length) this.debris = this.debris.filter((d) => !deadDebris.includes(d.id));
     for (const f of fragments) {
       if (this.debris.length >= TUNING.maxDebris) break;
-      const d = createDebris(this.nextId++, f, "collision");
+      const d = createDebris(this.nextId++, f, "collision", TUNING.fragmentSettleSec);
       this.debris.push(d);
       bus.emit({
         type: "debris-spawn",

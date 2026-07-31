@@ -82,6 +82,11 @@ export const TUNING = {
   // Debris-on-debris: two pieces consumed, three born — a slow net gain, so a
   // crowded band snowballs rather than quietly cleaning itself up.
   fragmentsPerDebrisCollision: 3,
+  // Fragments are scattered around the impact point rather than stacked on it,
+  // and are immune to collisions until they have dispersed. Without both, a
+  // single impact chain-reacts to the cascade cap within a few frames.
+  fragmentScatter: 14,
+  fragmentSettleSec: 3,
   fragmentSpeedJitter: 30, // px/s scatter added to fragments
   kesslerCap: 26, // debris count at which the ring cascades → game over
 
